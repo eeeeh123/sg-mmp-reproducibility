@@ -1,0 +1,110 @@
+{
+  "description": "Redacted derived GSM8K-500 outcomes; no prompts, reference answers, or generated reasoning are included.",
+  "groups": {
+    "gemma2/fp16": {
+      "n": 500,
+      "correct": 255,
+      "accuracy": 51.0
+    },
+    "gemma2/gptq": {
+      "n": 500,
+      "correct": 236,
+      "accuracy": 47.2
+    },
+    "gemma2/sg": {
+      "n": 500,
+      "correct": 252,
+      "accuracy": 50.4
+    },
+    "qwen05/abl_only_qkv_w8": {
+      "n": 500,
+      "correct": 113,
+      "accuracy": 22.6
+    },
+    "qwen05/abl_only_sensitive_w8": {
+      "n": 500,
+      "correct": 99,
+      "accuracy": 19.8
+    },
+    "qwen05/abl_sensitive_plus_ffn_w8": {
+      "n": 500,
+      "correct": 151,
+      "accuracy": 30.2
+    },
+    "qwen05/fp16": {
+      "n": 500,
+      "correct": 193,
+      "accuracy": 38.6
+    },
+    "qwen05/gptq": {
+      "n": 500,
+      "correct": 84,
+      "accuracy": 16.8
+    },
+    "qwen05/sg": {
+      "n": 500,
+      "correct": 134,
+      "accuracy": 26.8
+    },
+    "qwen15/fp16": {
+      "n": 500,
+      "correct": 299,
+      "accuracy": 59.8
+    },
+    "qwen15/gptq": {
+      "n": 500,
+      "correct": 230,
+      "accuracy": 46.0
+    },
+    "qwen15/sg": {
+      "n": 500,
+      "correct": 281,
+      "accuracy": 56.2
+    },
+    "smollm/fp16": {
+      "n": 500,
+      "correct": 150,
+      "accuracy": 30.0
+    },
+    "smollm/gptq": {
+      "n": 500,
+      "correct": 94,
+      "accuracy": 18.8
+    },
+    "smollm/sg": {
+      "n": 500,
+      "correct": 129,
+      "accuracy": 25.8
+    },
+    "tinyllama/fp16": {
+      "n": 500,
+      "correct": 13,
+      "accuracy": 2.6
+    },
+    "tinyllama/gptq": {
+      "n": 500,
+      "correct": 4,
+      "accuracy": 0.8
+    },
+    "tinyllama/sg": {
+      "n": 500,
+      "correct": 12,
+      "accuracy": 2.4
+    }
+  },
+  "row_count": 9000,
+  "group_count": 18,
+  "fields": [
+    "model_key",
+    "method",
+    "doc_id",
+    "prediction",
+    "correct"
+  ],
+  "raw_fields_excluded": [
+    "answer",
+    "generation",
+    "gold",
+    "question"
+  ]
+}

@@ -1,0 +1,25 @@
+# Model and quantization artifacts
+/models/
+/results/
+/figures/
+*.pt
+*.pth
+*.safetensors
+*.tmp
+
+# Private raw evaluator outputs
+**/samples/
+**/logs/
+**/cache/
+
+# Runtime files
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.pytest_cache/
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.vscode/

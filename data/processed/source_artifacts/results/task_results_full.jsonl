@@ -1,0 +1,59 @@
+{"model": "Qwen2.5-0.5B", "method": "fp16", "scores": {"arc_challenge": 32.51, "hellaswag": 52.18, "mmlu": 47.66, "gsm8k": 35.25, "svamp": 12.67}}
+{"model": "Qwen2.5-0.5B", "method": "rtn", "scores": {"arc_challenge": 34.04, "hellaswag": 50.39, "mmlu": 42.22, "gsm8k": 16.67}}
+{"model": "Qwen2.5-0.5B", "method": "gptq", "scores": {"arc_challenge": 30.97, "hellaswag": 50.46, "mmlu": 43.9, "gsm8k": 20.67, "svamp": 12.0}}
+{"model": "Qwen2.5-0.5B", "method": "awq", "scores": {"arc_challenge": 29.95, "hellaswag": 49.55, "mmlu": 43.22, "gsm8k": 10.33}}
+{"model": "Qwen2.5-0.5B", "method": "smoothquant", "scores": {"arc_challenge": 32.51, "hellaswag": 52.12, "mmlu": 47.33, "gsm8k": 37.67}}
+{"model": "Qwen2.5-1.5B", "method": "fp16", "scores": {"arc_challenge": 45.14, "hellaswag": 67.73, "mmlu": 59.71, "gsm8k": 63.0, "svamp": 32.33}}
+{"model": "Qwen2.5-1.5B", "method": "rtn", "scores": {"arc_challenge": 40.96, "hellaswag": 66.0, "mmlu": 52.44, "gsm8k": 48.0}}
+{"model": "Qwen2.5-1.5B", "method": "gptq", "scores": {"arc_challenge": 41.38, "hellaswag": 66.58, "mmlu": 56.91, "gsm8k": 49.0, "svamp": 26.33}}
+{"model": "Qwen2.5-1.5B", "method": "awq", "scores": {"arc_challenge": 42.83, "hellaswag": 65.45, "mmlu": 56.49, "gsm8k": 45.33}}
+{"model": "Qwen2.5-1.5B", "method": "smoothquant", "scores": {"arc_challenge": 44.97, "hellaswag": 67.75, "mmlu": 59.71, "gsm8k": 62.33}}
+{"model": "SmolLM-1.7B", "method": "fp16", "scores": {"arc_challenge": 47.53, "hellaswag": 71.43, "mmlu": 48.79, "gsm8k": 30.0, "svamp": 21.0}}
+{"model": "SmolLM-1.7B", "method": "rtn", "scores": {"arc_challenge": 46.33, "hellaswag": 69.93, "mmlu": 45.4, "gsm8k": 18.33}}
+{"model": "SmolLM-1.7B", "method": "gptq", "scores": {"arc_challenge": 46.59, "hellaswag": 70.01, "mmlu": 46.59, "gsm8k": 23.33, "svamp": 13.33}}
+{"model": "SmolLM-1.7B", "method": "awq", "scores": {"arc_challenge": 45.31, "hellaswag": 69.47, "mmlu": 44.72, "gsm8k": 17.33}}
+{"model": "SmolLM-1.7B", "method": "smoothquant", "scores": {"arc_challenge": 47.61, "hellaswag": 71.53, "mmlu": 48.8, "gsm8k": 29.33}}
+{"model": "Qwen2.5-0.5B", "method": "onecomp_qep_g0.0", "scores": {"arc_challenge": 30.12, "gsm8k": 12.0, "hellaswag": 49.66, "mmlu": 40.71}}
+{"model": "Qwen2.5-0.5B", "method": "onecomp_qep_g1.0", "scores": {"arc_challenge": 31.48, "gsm8k": 11.0, "hellaswag": 48.09, "mmlu": 37.83}}
+{"model": "Qwen2.5-0.5B", "method": "onecomp_qep_g0.0_64x1024", "scores": {"arc_challenge": 32.17, "gsm8k": 10.67, "hellaswag": 50.29, "mmlu": 39.29}}
+{"model": "Qwen2.5-0.5B", "method": "onecomp_qep_g1.0_64x1024", "scores": {"arc_challenge": 33.96, "gsm8k": 11.67, "hellaswag": 49.3, "mmlu": 41.82}}
+{"model": "Qwen2.5-0.5B", "method": "hadamard_gptq", "scores": {"arc_challenge": 30.72, "gsm8k": 11.0, "hellaswag": 50.35, "mmlu": 42.07}}
+{"model": "Qwen2.5-0.5B", "method": "config_b", "scores": {"arc_challenge": 32.25, "hellaswag": 51.18, "mmlu": 45.04, "gsm8k": 27.33, "svamp": 13.0}}
+{"model": "Qwen2.5-0.5B", "method": "config_b_lora", "scores": {"arc_challenge": 32.42, "hellaswag": 51.77, "mmlu": 45.86, "gsm8k": 20.67}}
+{"model": "Qwen2.5-0.5B", "method": "config_b_lora_v2", "scores": {"gsm8k": 28.0, "arc_challenge": 31.83, "hellaswag": 50.89, "mmlu": 44.61}}
+{"model": "Qwen2.5-0.5B", "method": "config_b_lora_v3", "scores": {"gsm8k": 25.67}}
+{"model": "Qwen2.5-0.5B", "method": "config_b_gsm8kcal", "scores": {"gsm8k": 24.67}}
+{"model": "Qwen2.5-1.5B", "method": "config_b_2b", "scores": {"arc_challenge": 44.2, "hellaswag": 67.35, "mmlu": 59.19, "gsm8k": 56.0, "svamp": 31.0}}
+{"model": "SmolLM-1.7B", "method": "config_b", "scores": {"arc_challenge": 45.31, "hellaswag": 70.37, "mmlu": 47.26, "gsm8k": 30.33, "svamp": 15.0}}
+{"model": "Qwen2.5-0.5B", "method": "config_b_failure_lora_6a", "scores": {"gsm8k": 24.67}}
+{"model": "Qwen2.5-0.5B", "method": "config_b_failure_lora_6b", "scores": {"gsm8k": 27.0}}
+{"model": "Qwen2.5-0.5B", "method": "config_b_failure_lora_6c", "scores": {"gsm8k": 29.0, "arc_challenge": 32.34, "hellaswag": 51.06, "mmlu": 44.86, "svamp": 4.0}}
+{"model": "Qwen2.5-0.5B", "method": "mixed_precision", "scores": {"arc_challenge": 30.8, "hellaswag": 50.98, "mmlu": 44.98, "gsm8k": 21.33}}
+{"model": "Qwen2.5-0.5B", "method": "gptq_mix0_100", "scores": {"gsm8k": 12.0}}
+{"model": "Qwen2.5-0.5B", "method": "gptq_mix100_0", "scores": {"gsm8k": 16.67, "arc_challenge": 33.0, "hellaswag": 47.33, "mmlu": 45.67}}
+{"model": "Qwen2.5-0.5B", "method": "gptq_mix20_80", "scores": {"gsm8k": 13.0}}
+{"model": "Qwen2.5-0.5B", "method": "gptq_mix40_60", "scores": {"gsm8k": 11.0}}
+{"model": "Qwen2.5-0.5B", "method": "gptq_mix60_40", "scores": {"gsm8k": 15.0}}
+{"model": "Qwen2.5-0.5B", "method": "gptq_mix80_20", "scores": {"gsm8k": 19.67, "arc_challenge": 33.67, "hellaswag": 47.0, "mmlu": 44.54}}
+{"model": "Qwen2.5-0.5B", "method": "config_b_mix0_100", "scores": {"gsm8k": 21.0, "arc_challenge": 33.67, "hellaswag": 49.0, "mmlu": 45.41}}
+{"model": "Qwen2.5-0.5B", "method": "config_b_mix100_0", "scores": {"gsm8k": 18.33, "arc_challenge": 33.67, "hellaswag": 49.33, "mmlu": 46.66}}
+{"model": "Qwen2.5-0.5B", "method": "config_b_mix20_80", "scores": {"gsm8k": 15.0}}
+{"model": "Qwen2.5-0.5B", "method": "random_42", "scores": {"gsm8k": 15.0}}
+{"model": "Qwen2.5-0.5B", "method": "random_123", "scores": {"gsm8k": 21.0}}
+{"model": "Qwen2.5-0.5B", "method": "random_456", "scores": {"gsm8k": 20.0}}
+{"model": "Qwen2.5-0.5B", "method": "first_4", "scores": {"gsm8k": 19.0}}
+{"model": "Qwen2.5-0.5B", "method": "last_4", "scores": {"gsm8k": 19.0}}
+{"model": "Qwen2.5-0.5B", "method": "random_42_samebudget_300", "scores": {"gsm8k": 20.33}}
+{"model": "Qwen2.5-0.5B", "method": "random_123_samebudget_300", "scores": {"gsm8k": 26.33}}
+{"model": "Qwen2.5-0.5B", "method": "random_456_samebudget_300", "scores": {"gsm8k": 24.0}}
+{"model": "Qwen2.5-0.5B", "method": "first_4_samebudget_300", "scores": {"gsm8k": 24.67}}
+{"model": "Qwen2.5-0.5B", "method": "last_4_samebudget_300", "scores": {"gsm8k": 24.67}}
+{"model": "Qwen2.5-0.5B", "method": "config_b_samebudget_300", "scores": {"gsm8k": 27.33}}
+{"model": "Qwen2.5-1.5B", "method": "config_b_2a", "scores": {"arc_challenge": 41.72, "hellaswag": 67.09, "mmlu": 57.95, "gsm8k": 55.0, "svamp": 31.0}}
+{"model": "Qwen2.5-0.5B", "method": "config_b_mix0_100_fixed", "scores": {"arc_challenge": 30.0, "hellaswag": 48.0, "mmlu": 47.0, "gsm8k": 25.67}}
+{"model": "Qwen2.5-0.5B", "method": "config_b_mix100_0_fixed", "scores": {"arc_challenge": 32.0, "hellaswag": 47.33, "mmlu": 45.8, "gsm8k": 27.33}}
+{"model": "Qwen2.5-0.5B", "method": "config_b_mix80_20_fixed", "scores": {"arc_challenge": 31.67, "hellaswag": 50.67, "mmlu": 45.93, "gsm8k": 24.0}}
+{"model": "Qwen2.5-0.5B", "method": "gptq_wiki128", "scores": {"gsm8k": 15.67, "arc_challenge": 30.89}}
+{"model": "Qwen2.5-0.5B", "method": "gptq_gsm128", "scores": {"gsm8k": 19.0, "arc_challenge": 31.48}}
+{"model": "Qwen2.5-0.5B", "method": "awq_wiki128", "scores": {"gsm8k": 10.33, "arc_challenge": 29.95}}
+{"model": "Qwen2.5-0.5B", "method": "awq_gsm128", "scores": {"gsm8k": 12.67, "arc_challenge": 30.55}}

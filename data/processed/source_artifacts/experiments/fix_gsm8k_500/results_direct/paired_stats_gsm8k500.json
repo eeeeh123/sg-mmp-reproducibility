@@ -1,0 +1,92 @@
+[
+  {
+    "model_key": "qwen05",
+    "model": "Qwen2.5-0.5B",
+    "n": 500,
+    "gptq_acc": 16.8,
+    "sg_acc": 26.8,
+    "delta": 10.0,
+    "both_correct": 57,
+    "both_wrong": 339,
+    "gptq_wrong_sg_correct": 77,
+    "gptq_correct_sg_wrong": 27,
+    "mcnemar_p_exact": 9.701730804528467e-07,
+    "paired_bootstrap_delta_mean": 10.002,
+    "paired_bootstrap_ci95": [
+      6.2,
+      14.0
+    ]
+  },
+  {
+    "model_key": "qwen15",
+    "model": "Qwen2.5-1.5B",
+    "n": 500,
+    "gptq_acc": 46.0,
+    "sg_acc": 56.2,
+    "delta": 10.2,
+    "both_correct": 197,
+    "both_wrong": 186,
+    "gptq_wrong_sg_correct": 84,
+    "gptq_correct_sg_wrong": 33,
+    "mcnemar_p_exact": 2.673285486288063e-06,
+    "paired_bootstrap_delta_mean": 10.185,
+    "paired_bootstrap_ci95": [
+      6.0,
+      14.4
+    ]
+  },
+  {
+    "model_key": "smollm",
+    "model": "SmolLM-1.7B",
+    "n": 500,
+    "gptq_acc": 18.8,
+    "sg_acc": 25.8,
+    "delta": 7.0,
+    "both_correct": 63,
+    "both_wrong": 340,
+    "gptq_wrong_sg_correct": 66,
+    "gptq_correct_sg_wrong": 31,
+    "mcnemar_p_exact": 0.0004901579489633008,
+    "paired_bootstrap_delta_mean": 7.007,
+    "paired_bootstrap_ci95": [
+      3.2,
+      10.8
+    ]
+  },
+  {
+    "model_key": "tinyllama",
+    "model": "TinyLlama-1.1B-intermediate-step-1431k-3T",
+    "n": 500,
+    "gptq_acc": 0.8,
+    "sg_acc": 2.4,
+    "delta": 1.6,
+    "both_correct": 2,
+    "both_wrong": 486,
+    "gptq_wrong_sg_correct": 10,
+    "gptq_correct_sg_wrong": 2,
+    "mcnemar_p_exact": 0.03857421875,
+    "paired_bootstrap_delta_mean": 1.588,
+    "paired_bootstrap_ci95": [
+      0.4,
+      3.0
+    ]
+  },
+  {
+    "model_key": "gemma2",
+    "model": "gemma-2-2b-it",
+    "n": 500,
+    "gptq_acc": 47.2,
+    "sg_acc": 50.4,
+    "delta": 3.2,
+    "both_correct": 203,
+    "both_wrong": 215,
+    "gptq_wrong_sg_correct": 49,
+    "gptq_correct_sg_wrong": 33,
+    "mcnemar_p_exact": 0.09703091129729906,
+    "paired_bootstrap_delta_mean": 3.223,
+    "paired_bootstrap_ci95": [
+      -0.4,
+      6.8
+    ]
+  }
+]

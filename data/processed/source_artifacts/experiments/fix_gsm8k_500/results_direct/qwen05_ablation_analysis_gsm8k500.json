@@ -1,0 +1,194 @@
+{
+  "rows": [
+    {
+      "method": "fp16",
+      "label": "FP16",
+      "note": "full precision reference",
+      "n": 500,
+      "correct": 193,
+      "accuracy": 38.6,
+      "w8_modules": null,
+      "w4_modules": null,
+      "w8_params": null,
+      "w4_params": null,
+      "avg_bit": 16.0,
+      "delta_vs_gptq": 21.8,
+      "restoration_rate": 1.0
+    },
+    {
+      "method": "gptq",
+      "label": "GPTQ-W4",
+      "note": "uniform W4 baseline",
+      "n": 500,
+      "correct": 84,
+      "accuracy": 16.8,
+      "w8_modules": 0,
+      "w4_modules": 168,
+      "w8_params": 0,
+      "w4_params": 357826560,
+      "avg_bit": 4.0,
+      "delta_vs_gptq": 0.0,
+      "restoration_rate": 0.0
+    },
+    {
+      "method": "sg",
+      "label": "SG-MMP",
+      "note": "sensitive layers W8 plus non-sensitive q/k/v W8",
+      "n": 500,
+      "correct": 134,
+      "accuracy": 26.8,
+      "w8_modules": 88,
+      "w4_modules": 80,
+      "w8_params": 80281600,
+      "w4_params": 277544960,
+      "avg_bit": 4.897435897435898,
+      "delta_vs_gptq": 10.0,
+      "restoration_rate": 0.4587155963302752
+    },
+    {
+      "method": "abl_only_sensitive_w8",
+      "label": "Only sensitive layers W8",
+      "note": "removes non-sensitive q/k/v protection",
+      "n": 500,
+      "correct": 99,
+      "accuracy": 19.8,
+      "w8_modules": 28,
+      "w4_modules": 140,
+      "w8_params": 59637760,
+      "w4_params": 298188800,
+      "avg_bit": 4.666666666666667,
+      "delta_vs_gptq": 3.0,
+      "restoration_rate": 0.13761467889908258
+    },
+    {
+      "method": "abl_only_qkv_w8",
+      "label": "Only q/k/v W8",
+      "note": "protects q/k/v everywhere but not full sensitive layers",
+      "n": 500,
+      "correct": 113,
+      "accuracy": 22.6,
+      "w8_modules": 72,
+      "w4_modules": 96,
+      "w8_params": 24772608,
+      "w4_params": 333053952,
+      "avg_bit": 4.276923076923077,
+      "delta_vs_gptq": 5.800000000000001,
+      "restoration_rate": 0.26605504587155965
+    },
+    {
+      "method": "abl_sensitive_plus_ffn_w8",
+      "label": "Sensitive layers + FFN W8",
+      "note": "higher-budget variant; not a same-budget control",
+      "n": 500,
+      "correct": 151,
+      "accuracy": 30.2,
+      "w8_modules": 108,
+      "w4_modules": 60,
+      "w8_params": 337182720,
+      "w4_params": 20643840,
+      "avg_bit": 7.769230769230769,
+      "delta_vs_gptq": 13.399999999999999,
+      "restoration_rate": 0.6146788990825687
+    }
+  ],
+  "paired": [
+    {
+      "base": "gptq",
+      "other": "sg",
+      "n": 500,
+      "delta": 10.0,
+      "base_wrong_other_correct": 77,
+      "base_correct_other_wrong": 27,
+      "mcnemar_p_exact": 9.701730804528467e-07,
+      "bootstrap_mean": 10.00224,
+      "bootstrap_ci95": [
+        6.2,
+        14.0
+      ]
+    },
+    {
+      "base": "gptq",
+      "other": "abl_only_sensitive_w8",
+      "n": 500,
+      "delta": 3.0,
+      "base_wrong_other_correct": 52,
+      "base_correct_other_wrong": 37,
+      "mcnemar_p_exact": 0.13736797135565199,
+      "bootstrap_mean": 2.97732,
+      "bootstrap_ci95": [
+        -0.6,
+        6.8
+      ]
+    },
+    {
+      "base": "gptq",
+      "other": "abl_only_qkv_w8",
+      "n": 500,
+      "delta": 5.8,
+      "base_wrong_other_correct": 63,
+      "base_correct_other_wrong": 34,
+      "mcnemar_p_exact": 0.00422580392168276,
+      "bootstrap_mean": 5.78244,
+      "bootstrap_ci95": [
+        2.0,
+        9.6
+      ]
+    },
+    {
+      "base": "gptq",
+      "other": "abl_sensitive_plus_ffn_w8",
+      "n": 500,
+      "delta": 13.4,
+      "base_wrong_other_correct": 96,
+      "base_correct_other_wrong": 29,
+      "mcnemar_p_exact": 1.429276407178026e-09,
+      "bootstrap_mean": 13.36982,
+      "bootstrap_ci95": [
+        9.2,
+        17.6
+      ]
+    },
+    {
+      "base": "sg",
+      "other": "abl_only_sensitive_w8",
+      "n": 500,
+      "delta": -7.0,
+      "base_wrong_other_correct": 26,
+      "base_correct_other_wrong": 61,
+      "mcnemar_p_exact": 0.00022368935609481816,
+      "bootstrap_mean": -7.02492,
+      "bootstrap_ci95": [
+        -10.6,
+        -3.4
+      ]
+    },
+    {
+      "base": "sg",
+      "other": "abl_only_qkv_w8",
+      "n": 500,
+      "delta": -4.2,
+      "base_wrong_other_correct": 32,
+      "base_correct_other_wrong": 53,
+      "mcnemar_p_exact": 0.02945636178577888,
+      "bootstrap_mean": -4.2198,
+      "bootstrap_ci95": [
+        -7.8,
+        -0.6
+      ]
+    },
+    {
+      "base": "sg",
+      "other": "abl_sensitive_plus_ffn_w8",
+      "n": 500,
+      "delta": 3.4,
+      "base_wrong_other_correct": 69,
+      "base_correct_other_wrong": 52,
+      "mcnemar_p_exact": 0.14548652043450483,
+      "bootstrap_mean": 3.36758,
+      "bootstrap_ci95": [
+        -0.8,
+        7.6
+      ]
+    }
+  ]
+}

@@ -1,0 +1,173 @@
+[
+  {
+    "model": "qwen05",
+    "slice": "overlap_with_original_limit300",
+    "n": 119,
+    "doc_id_min": 0,
+    "doc_id_max": 298,
+    "fp16_acc": 31.932773109243698,
+    "gptq_acc": 19.327731092436974,
+    "sg_acc": 22.689075630252102,
+    "delta": 3.361344537815126,
+    "gptq_wrong_sg_correct": 13,
+    "gptq_correct_sg_wrong": 9,
+    "mcnemar_p_exact": 0.5234670639038086,
+    "bootstrap_mean": 3.317563025210084,
+    "bootstrap_ci95": [
+      -4.201680672268908,
+      10.92436974789916
+    ]
+  },
+  {
+    "model": "qwen05",
+    "slice": "heldout_doc_id_ge_300",
+    "n": 381,
+    "doc_id_min": 302,
+    "doc_id_max": 1316,
+    "fp16_acc": 40.68241469816273,
+    "gptq_acc": 16.010498687664043,
+    "sg_acc": 28.083989501312335,
+    "delta": 12.073490813648293,
+    "gptq_wrong_sg_correct": 64,
+    "gptq_correct_sg_wrong": 18,
+    "mcnemar_p_exact": 3.3155201688474993e-07,
+    "bootstrap_mean": 12.043779527559055,
+    "bootstrap_ci95": [
+      7.611548556430447,
+      16.53543307086614
+    ]
+  },
+  {
+    "model": "qwen05",
+    "slice": "all_direct500",
+    "n": 500,
+    "doc_id_min": 0,
+    "doc_id_max": 1316,
+    "fp16_acc": 38.6,
+    "gptq_acc": 16.8,
+    "sg_acc": 26.8,
+    "delta": 10.0,
+    "gptq_wrong_sg_correct": 77,
+    "gptq_correct_sg_wrong": 27,
+    "mcnemar_p_exact": 9.701730804528467e-07,
+    "bootstrap_mean": 10.00224,
+    "bootstrap_ci95": [
+      6.2,
+      14.0
+    ]
+  },
+  {
+    "model": "qwen15",
+    "slice": "overlap_with_original_limit300",
+    "n": 119,
+    "doc_id_min": 0,
+    "doc_id_max": 298,
+    "fp16_acc": 56.30252100840336,
+    "gptq_acc": 40.33613445378151,
+    "sg_acc": 50.42016806722689,
+    "delta": 10.084033613445378,
+    "gptq_wrong_sg_correct": 19,
+    "gptq_correct_sg_wrong": 7,
+    "mcnemar_p_exact": 0.028959274291992188,
+    "bootstrap_mean": 10.03252100840336,
+    "bootstrap_ci95": [
+      1.680672268907563,
+      18.48739495798319
+    ]
+  },
+  {
+    "model": "qwen15",
+    "slice": "heldout_doc_id_ge_300",
+    "n": 381,
+    "doc_id_min": 302,
+    "doc_id_max": 1316,
+    "fp16_acc": 60.89238845144357,
+    "gptq_acc": 47.76902887139108,
+    "sg_acc": 58.00524934383202,
+    "delta": 10.236220472440944,
+    "gptq_wrong_sg_correct": 65,
+    "gptq_correct_sg_wrong": 26,
+    "mcnemar_p_exact": 5.311762926784266e-05,
+    "bootstrap_mean": 10.281259842519685,
+    "bootstrap_ci95": [
+      5.511811023622047,
+      14.960629921259843
+    ]
+  },
+  {
+    "model": "qwen15",
+    "slice": "all_direct500",
+    "n": 500,
+    "doc_id_min": 0,
+    "doc_id_max": 1316,
+    "fp16_acc": 59.8,
+    "gptq_acc": 46.0,
+    "sg_acc": 56.2,
+    "delta": 10.2,
+    "gptq_wrong_sg_correct": 84,
+    "gptq_correct_sg_wrong": 33,
+    "mcnemar_p_exact": 2.673285486288063e-06,
+    "bootstrap_mean": 10.1848,
+    "bootstrap_ci95": [
+      6.0,
+      14.4
+    ]
+  },
+  {
+    "model": "smollm",
+    "slice": "overlap_with_original_limit300",
+    "n": 119,
+    "doc_id_min": 0,
+    "doc_id_max": 298,
+    "fp16_acc": 28.571428571428573,
+    "gptq_acc": 17.647058823529413,
+    "sg_acc": 18.48739495798319,
+    "delta": 0.8403361344537815,
+    "gptq_wrong_sg_correct": 7,
+    "gptq_correct_sg_wrong": 6,
+    "mcnemar_p_exact": 1.0,
+    "bootstrap_mean": 0.832436974789916,
+    "bootstrap_ci95": [
+      -5.042016806722689,
+      6.722689075630252
+    ]
+  },
+  {
+    "model": "smollm",
+    "slice": "heldout_doc_id_ge_300",
+    "n": 381,
+    "doc_id_min": 302,
+    "doc_id_max": 1316,
+    "fp16_acc": 30.446194225721786,
+    "gptq_acc": 19.16010498687664,
+    "sg_acc": 28.083989501312335,
+    "delta": 8.923884514435695,
+    "gptq_wrong_sg_correct": 59,
+    "gptq_correct_sg_wrong": 25,
+    "mcnemar_p_exact": 0.00026645108697203517,
+    "bootstrap_mean": 8.938110236220473,
+    "bootstrap_ci95": [
+      4.199475065616798,
+      13.385826771653543
+    ]
+  },
+  {
+    "model": "smollm",
+    "slice": "all_direct500",
+    "n": 500,
+    "doc_id_min": 0,
+    "doc_id_max": 1316,
+    "fp16_acc": 30.0,
+    "gptq_acc": 18.8,
+    "sg_acc": 25.8,
+    "delta": 7.0,
+    "gptq_wrong_sg_correct": 66,
+    "gptq_correct_sg_wrong": 31,
+    "mcnemar_p_exact": 0.0004901579489633008,
+    "bootstrap_mean": 7.00654,
+    "bootstrap_ci95": [
+      3.2,
+      10.8
+    ]
+  }
+]

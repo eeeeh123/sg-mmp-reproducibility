@@ -1,0 +1,19 @@
+{
+  "title": "SG-MMP: Reproducibility Package for Reasoning Fragility in Quantized Small Language Models",
+  "upload_type": "software",
+  "description": "Code, fixed evaluation indices, redacted derived outcomes, paired statistical analyses, and figure-generation scripts for sensitivity-guided module-level mixed-precision repair of quantization-induced reasoning degradation in small language models.",
+  "creators": [
+    {"name": "Cui, Guanxun"},
+    {"name": "Liu, Qiang"}
+  ],
+  "keywords": ["post-training quantization", "small language models", "mathematical reasoning", "mixed precision", "reproducibility"],
+  "license": "MIT",
+  "access_right": "open",
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/eeeeh123/sg-mmp-reproducibility",
+      "relation": "isSupplementTo",
+      "scheme": "url"
+    }
+  ]
+}
