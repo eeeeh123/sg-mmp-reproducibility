@@ -34,12 +34,11 @@ from statistics import mean
 sys.path.insert(0, ".")
 
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128")
 
 import torch
 import pyarrow.ipc as pa_ipc
+from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ptq.eval import cleanup_gpu
@@ -68,6 +67,13 @@ GSM8K_CACHE_ROOT = (
     / "0.0.0"
     / "740312add88f781978c0658806c59bc2815b9866"
 )
+
+# The original Windows runs used a pre-populated Arrow cache because dataset
+# resolution was unreliable in that environment.  A release consumer should
+# instead be able to download the public benchmark on first use.  ``--offline``
+# keeps the historical cache-only behavior for an air-gapped rerun.
+OFFLINE_MODE = False
+DATASET_CACHE_DIR: Path | None = None
 
 MODEL_SPECS = {
     "qwen05": {
@@ -239,11 +245,23 @@ def read_arrow_split(split: str) -> list[dict]:
 
 
 def get_dataset():
-    # Avoid datasets.load_dataset() here. In this Windows/Codex environment it
-    # can stall while resolving the HF dataset builder even when the Arrow cache
-    # is already present. Reading the cached Arrow files is deterministic and
-    # keeps this validation fully offline.
-    return read_arrow_split("train"), read_arrow_split("test")
+    if OFFLINE_MODE:
+        # Avoid datasets.load_dataset() here.  The historical Windows runs used
+        # cached Arrow files, and this branch preserves that exact behavior.
+        return read_arrow_split("train"), read_arrow_split("test")
+
+    cache_dir = str(DATASET_CACHE_DIR) if DATASET_CACHE_DIR is not None else None
+    status("load_dataset_start", dataset="openai/gsm8k", cache_dir=cache_dir)
+    try:
+        train = load_dataset("openai/gsm8k", "main", split="train", cache_dir=cache_dir)
+        test = load_dataset("openai/gsm8k", "main", split="test", cache_dir=cache_dir)
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not load public GSM8K. Check network access, or rerun with "
+            "--offline after populating the Hugging Face dataset cache."
+        ) from exc
+    status("load_dataset_done", train_rows=len(train), test_rows=len(test))
+    return train, test
 
 
 def fixed_indices(n: int) -> list[int]:
@@ -692,8 +710,27 @@ def main():
     parser.add_argument("--n", type=int, default=DEFAULT_N)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--max-new-tokens", type=int, default=256)
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Use the historical local Arrow cache instead of downloading GSM8K.",
+    )
+    parser.add_argument(
+        "--dataset-cache-dir",
+        type=Path,
+        default=None,
+        help="Optional Hugging Face datasets cache directory for online loading.",
+    )
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
+
+    global OFFLINE_MODE, DATASET_CACHE_DIR
+    OFFLINE_MODE = args.offline
+    DATASET_CACHE_DIR = args.dataset_cache_dir
+    if OFFLINE_MODE:
+        os.environ["HF_DATASETS_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    status("dataset_mode", offline=OFFLINE_MODE, cache_dir=str(DATASET_CACHE_DIR) if DATASET_CACHE_DIR else None)
 
     if args.cmd == "indices":
         indices = fixed_indices(args.n)

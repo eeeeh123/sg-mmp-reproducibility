@@ -15,6 +15,19 @@ def digest(path: Path) -> str:
     return hasher.hexdigest()
 
 
+def is_released_file(path: Path, root: Path, output: Path) -> bool:
+    if not path.is_file() or path.resolve() == output:
+        return False
+    parts = path.relative_to(root).parts
+    if not parts:
+        return False
+    if parts[0] in {".git", "models", "results", "figures", ".venv", ".pytest_cache", ".release-audit"}:
+        return False
+    if any(part in {"__pycache__", "samples", "logs", "cache"} for part in parts):
+        return False
+    return path.suffix.lower() not in {".pt", ".pth", ".pyc", ".safetensors", ".tmp", ".zip"}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path("."))
@@ -25,10 +38,7 @@ def main() -> None:
     paths = sorted(
         path
         for path in root.rglob("*")
-        if path.is_file()
-        and path.resolve() != output
-        and ".git" not in path.relative_to(root).parts
-        and "figures" not in path.relative_to(root).parts
+        if is_released_file(path, root, output)
     )
     lines = [f"{digest(path)}  {path.relative_to(root).as_posix()}" for path in paths]
     output.write_text("\n".join(lines) + "\n", encoding="utf-8")

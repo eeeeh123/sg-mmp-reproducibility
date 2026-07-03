@@ -1,0 +1,41 @@
+{
+  "description": "Reference values for the released direct GSM8K-500 evaluation. These are comparison targets, not an assertion that every future GPU and library stack will be bit-identical.",
+  "protocol": "configs/reproduction_manifest.json#direct_gsm8k_500",
+  "primary_results": [
+    {
+      "model": "Qwen2.5-0.5B",
+      "fp16_accuracy": 38.6,
+      "gptq_w4_accuracy": 16.8,
+      "sg_mmp_accuracy": 26.8,
+      "sg_mmp_minus_gptq": 10.0,
+      "paired_bootstrap_ci95": [6.2, 14.0],
+      "mcnemar_p_exact": 9.701730804528467e-07
+    },
+    {
+      "model": "Qwen2.5-1.5B",
+      "fp16_accuracy": 59.8,
+      "gptq_w4_accuracy": 46.0,
+      "sg_mmp_accuracy": 56.2,
+      "sg_mmp_minus_gptq": 10.2,
+      "paired_bootstrap_ci95": [6.0, 14.4],
+      "mcnemar_p_exact": 2.673285486288063e-06
+    },
+    {
+      "model": "SmolLM2-1.7B",
+      "fp16_accuracy": 30.0,
+      "gptq_w4_accuracy": 18.8,
+      "sg_mmp_accuracy": 25.8,
+      "sg_mmp_minus_gptq": 7.0,
+      "paired_bootstrap_ci95": [3.2, 10.8],
+      "mcnemar_p_exact": 0.0004901579489633008
+    }
+  ],
+  "qwen05_selection_nonoverlap": {
+    "n": 381,
+    "gptq_w4_accuracy": 16.010498687664043,
+    "sg_mmp_accuracy": 28.083989501312335,
+    "sg_mmp_minus_gptq": 12.073490813648293,
+    "paired_bootstrap_ci95": [7.611548556430447, 16.53543307086614],
+    "mcnemar_p_exact": 3.315520168847499e-07
+  }
+}

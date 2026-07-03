@@ -1,0 +1,45 @@
+{
+  "description": "Released bit-budget summaries. Average weight bits are parameter-weighted; they exclude embeddings, normalization layers, and quantization metadata.",
+  "rows": [
+    {
+      "model": "Qwen2.5-0.5B",
+      "variant": "SG-MMP",
+      "w8_modules": 88,
+      "w4_modules": 80,
+      "w8_parameters": 80281600,
+      "w4_parameters": 277544960,
+      "average_weight_bits": 4.897435897435898,
+      "role": "primary"
+    },
+    {
+      "model": "Qwen2.5-1.5B",
+      "variant": "SG-MMP-2a",
+      "w8_modules": 100,
+      "w4_modules": 96,
+      "w8_parameters": 262700000,
+      "w4_parameters": 1047500000,
+      "average_weight_bits": 4.8,
+      "role": "primary"
+    },
+    {
+      "model": "Qwen2.5-1.5B",
+      "variant": "SG-MMP-2b",
+      "w8_modules": 164,
+      "w4_modules": 32,
+      "w8_parameters": 961000000,
+      "w4_parameters": 349200000,
+      "average_weight_bits": 6.93,
+      "role": "high-budget variant; not a same-budget control"
+    },
+    {
+      "model": "SmolLM2-1.7B",
+      "variant": "SG-MMP",
+      "w8_modules": 88,
+      "w4_modules": 80,
+      "w8_parameters": 520100000,
+      "w4_parameters": 1090500000,
+      "average_weight_bits": 5.29,
+      "role": "primary"
+    }
+  ]
+}

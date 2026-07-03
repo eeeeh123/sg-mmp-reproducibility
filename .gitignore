@@ -2,6 +2,7 @@
 /models/
 /results/
 /figures/
+/*.zip
 *.pt
 *.pth
 *.safetensors
@@ -18,6 +19,7 @@ __pycache__/
 .venv/
 .env
 .pytest_cache/
+.release-audit/
 
 # Editor and OS files
 .DS_Store

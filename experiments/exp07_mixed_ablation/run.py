@@ -11,6 +11,7 @@ import os
 import sys
 sys.path.insert(0, ".")
 
+import argparse
 import torch
 import gc
 import re
@@ -142,12 +143,38 @@ def eval_gsm8k(config_name, state_path):
 # ============================================================
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--configs",
+        default="config_a,config_b,config_c",
+        help="Comma-separated subset of config_a, config_b, config_c.",
+    )
+    parser.add_argument(
+        "--quantize-only",
+        action="store_true",
+        help="Write requested states without running the legacy GSM8K-300 screen.",
+    )
+    args = parser.parse_args()
+    requested = {name.strip() for name in args.configs.split(",") if name.strip()}
+    known = {name for name, _, _ in CONFIGS}
+    unknown = requested - known
+    if unknown:
+        parser.error(f"Unknown configs: {sorted(unknown)}")
+
     results = {}
 
     for config_name, policy, state_path in CONFIGS:
+        if config_name not in requested:
+            continue
         quantize_config(config_name, policy, state_path)
+        if args.quantize_only:
+            continue
         gsm8k = eval_gsm8k(config_name, state_path)
         results[config_name] = gsm8k
+
+    if args.quantize_only:
+        print(f"Quantized requested configurations: {', '.join(sorted(requested))}")
+        return
 
     # 对比
     print(f"\n{'='*60}")

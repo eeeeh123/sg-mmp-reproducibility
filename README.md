@@ -1,22 +1,24 @@
 # SG-MMP Reproducibility Package
 
-This repository contains the code, fixed evaluation indices, and derived
-results supporting *Reasoning Fragility in Quantized Small Language Models:
-Diagnosis and Sensitivity-Guided Mixed-Precision Repair*.
+Version `1.1.0` of the code and derived results supporting *Reasoning
+Fragility in Quantized Small Language Models: Diagnosis and
+Sensitivity-Guided Mixed-Precision Repair*.
 
-## What is included
+## What this release can reproduce
 
-- Implementations of GPTQ-style quantization, the in-house AWQ baseline, and
-  sensitivity-guided module-level mixed precision (SG-MMP).
-- Broad benchmark scripts and the direct paired GSM8K-500 evaluator.
-- The fixed GSM8K-500 index set, redacted per-example correctness outcomes,
-  paired statistics, and figure-generation code.
-- A figure-generation script that reads only the released derived results.
+Two reproduction paths are deliberately separated:
 
-Model weights, quantized state files, benchmark prompts and solutions, and
-generated reasoning traces are intentionally not redistributed. They are either
-large, governed by upstream licenses, or not needed to inspect the reported
-statistics.
+1. **Public-artifact verification, no GPU or checkpoints required.** Recompute
+   the paired GSM8K-500 statistics from redacted per-example outcomes and
+   regenerate all figures.
+2. **End-to-end model rerun.** Download the three primary checkpoints, cache
+   public datasets, regenerate GPTQ and SG-MMP states, and run direct
+   GSM8K-500 evaluation.
+
+The package does not redistribute model weights, quantized states, GSM8K
+prompts or answers, or generated reasoning traces. See
+`docs/reproducibility.md` for the protocol and `docs/environment.md` for the
+tested software stack.
 
 ## Main direct GSM8K-500 results
 
@@ -27,43 +29,47 @@ statistics.
 | SmolLM2-1.7B | 18.80 | 25.80 | +7.00 | [+3.20, +10.80] |
 | Gemma-2-2B-it | 47.20 | 50.40 | +3.20 | [-0.40, +6.80] |
 
-The Gemma result is a boundary check whose confidence interval crosses zero;
-it is not presented as confirmatory evidence for SG-MMP.
+Gemma-2-2B-it is a boundary-family check: its confidence interval crosses
+zero and is not confirmatory evidence for SG-MMP.
 
-## Quick start
+## Quick start: verify the public release
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+python scripts/reproduce_core.py verify-public
+python scripts/reproduce_core.py figures
 ```
 
-Download the original checkpoints under their upstream licenses. The model
-identifiers are recorded in `docs/model_provenance.md`. Gemma access requires
-accepting its upstream terms. The public evaluator expects local models under
-`models/` and quantized states under `results/`; these states are regenerated,
-not distributed.
+`verify-public` validates every source-file checksum and confirms that the
+released redacted outcomes reproduce the paired-statistics JSON byte-for-byte.
+Generated figures are written to the ignored local `figures/` directory.
+
+## End-to-end rerun
 
 ```powershell
-# Broad benchmark pipeline
-python scripts/01_download_models.py
-python experiments/exp01_baseline/run.py
-
-# Recompute paired statistics from the released redacted outcomes
-python scripts/analyze_released_gsm8k500.py
-
-# Regenerate analysis figures from released results
-python scripts/generate_figures.py
+python scripts/reproduce_core.py download-primary
+python scripts/reproduce_core.py prepare-data
+python scripts/reproduce_core.py quantize
+python scripts/reproduce_core.py evaluate
+python scripts/reproduce_core.py analyze
 ```
 
-For exact protocols, data boundaries, expected outputs, and model identity,
-read [docs/reproducibility.md](docs/reproducibility.md) and
-[docs/model_provenance.md](docs/model_provenance.md).
+The main quantization steps are GPU-intensive. The wrapper runs each model
+family in separate Python processes and writes intermediate states under the
+ignored local `results/` directory. Use `--dry-run` with any command to inspect
+the exact commands before running them.
 
-## Artifact boundaries
+## Important provenance note
 
-`data/processed/gsm8k500/per_example_correctness.csv` contains only model key,
-method, test-document identifier, normalized prediction, and correctness. It
-does not include GSM8K prompts, reference answers, or model generations. To
-rerun evaluation from scratch, obtain GSM8K from its original distribution.
+The original local downloads did not preserve Hugging Face checkpoint commit
+hashes or the original dataset fingerprint. Canonical model identifiers,
+protocol, fixed test indices, and this limitation are recorded in
+`configs/reproduction_manifest.json`. A future rerun should record its own
+checkpoint revisions before claiming byte-identical reproduction.
+
+For model identity, artifact-to-claim mapping, and archive boundaries, see
+`docs/model_provenance.md`, `docs/artifact_manifest.md`, and
+`docs/zenodo_release.md`.
 

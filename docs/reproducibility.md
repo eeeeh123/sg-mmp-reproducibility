@@ -1,50 +1,83 @@
 # Reproducibility protocol
 
-## Scope
+## Evaluation settings
 
-The paper reports two distinct evaluation settings:
+The paper uses two distinct settings that must not be conflated:
 
-1. **Broad benchmark setting**: ARC-Challenge, HellaSwag, MMLU, and a fixed
-   GSM8K-300 subset, evaluated through the local LM Evaluation Harness stack.
-2. **Direct paired setting**: a fixed GSM8K-500 test subset using a common
-   five-shot prompt, greedy generation, exact-match numeric extraction, exact
-   McNemar tests, and 10,000 paired-bootstrap resamples.
+1. **Broad benchmark setting:** ARC-Challenge, HellaSwag, MMLU, and a fixed
+   GSM8K-300 subset through the local LM Evaluation Harness stack.
+2. **Direct paired setting:** a fixed GSM8K-500 test subset with a common
+   five-shot prompt, greedy generation, numeric exact match, exact McNemar
+   tests, and 10,000 paired-bootstrap resamples.
 
-These settings must not be conflated. The direct GSM8K-500 comparison is the
-primary confirmatory SG-MMP repair result.
+The direct setting is reproducible through
+`experiments/fix_gsm8k_500/direct_eval.py`. It loads public GSM8K online by
+default; pass `--offline` only when reproducing from an existing Arrow cache.
 
-## Deterministic inputs
+## Fixed protocol
 
 - GSM8K-500 seed: `20260615`.
-- Selection: shuffle `range(1319)` with the seed, retain the first 500, then
-  sort indices into dataset order.
-- Calibration: 128 WikiText-2 samples, sequence length 2048 unless an
-  experiment explicitly says otherwise.
-- GPTQ and weight-only methods: 4-bit weights, group size 128.
-- Direct generation: greedy decoding, five in-context examples, maximum 256
+- Selection: shuffle `range(1319)` with the seed, keep the first 500, then
+  sort indices into test-set order.
+- Calibration: 128 WikiText-2 training samples, seed 42, sequence length 2048.
+- GPTQ: 4-bit weights and group size 128.
+- Direct generation: five in-context examples, greedy decoding, maximum 256
   generated tokens.
 
-## Reproduce derived analyses without checkpoints
+`configs/reproduction_manifest.json` is the machine-readable source for this
+protocol and for the published sensitive-layer sets.
 
-The released redacted data is sufficient to audit paired outcomes and the
-reported direct scores. The statistical summaries are in:
+## Public verification path
 
-```text
-data/processed/source_artifacts/experiments/fix_gsm8k_500/results_direct/
-data/processed/gsm8k500/
+The release contains enough redacted data to audit the reported direct paired
+statistics without model checkpoints:
+
+```powershell
+python scripts/reproduce_core.py verify-public
+python scripts/reproduce_core.py figures
 ```
 
-## Recompute model outputs
+The first command validates `SHA256SUMS` and recomputes
+`data/processed/gsm8k500/recomputed_paired_stats.json` from
+`per_example_correctness.csv`. The second command creates ignored local figure
+files from released summaries only.
 
-1. Install `requirements.txt` in a CUDA-enabled Python environment matching
-   the recorded package versions where possible.
-2. Download upstream checkpoints under their original licenses.
-3. Run the required sensitivity screen, GPTQ quantization, and SG-MMP
-   quantization scripts for a model family.
-4. Run `experiments/fix_gsm8k_500/direct_eval.py` on identical local model and
-   state paths, then run its `analyze` command.
-5. Rebuild analysis figures with `python scripts/generate_figures.py`.
+## End-to-end rerun path
 
-Quantized `.pt` states are omitted because they are multi-gigabyte,
-implementation-specific intermediate artifacts. Their absence does not alter
-the fixed inputs or release of all derived outcomes.
+```powershell
+python scripts/reproduce_core.py download-primary
+python scripts/reproduce_core.py prepare-data
+python scripts/reproduce_core.py quantize
+python scripts/reproduce_core.py evaluate
+python scripts/reproduce_core.py analyze
+```
+
+The wrapper is intentionally explicit about stages. It does not publish or
+copy intermediate `.pt` states, raw GSM8K records, or raw generations. The
+private evaluator writes raw logs under ignored `samples/` directories; use
+`scripts/export_public_gsm8k_results.py` if a future release needs redacted
+per-example outcomes.
+
+## Selection/evaluation separation
+
+The original Qwen2.5-0.5B single-layer sensitivity screen used the first 300
+GSM8K test documents. Consequently, 119 documents in the fixed direct-500
+subset overlap that historical screen. This release includes a non-overlap
+robustness analysis on the remaining 381 documents in:
+
+```text
+data/processed/source_artifacts/experiments/fix_gsm8k_500/
+results_direct/selection_eval_split_gsm8k500.json
+```
+
+For Qwen2.5-0.5B, the non-overlap slice reports GPTQ-W4 16.01, SG-MMP 28.08,
+and a +12.07 point paired difference (95% bootstrap CI [7.61, 16.54]; exact
+McNemar p = 3.32e-7). This is a robustness check, not a substitute for a
+fresh validation-based layer-selection study.
+
+## Provenance limitations
+
+The original runs did not preserve Hugging Face checkpoint commit hashes or a
+dataset fingerprint. The release records the canonical identifiers and exact
+input-selection algorithm, but it does not claim that a new upstream download
+will be byte-identical. Record those revisions before any future rerun.

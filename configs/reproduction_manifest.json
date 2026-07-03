@@ -1,0 +1,72 @@
+{
+  "release_version": "1.1.0",
+  "repository": "https://github.com/eeeeh123/sg-mmp-reproducibility",
+  "primary_models": [
+    {
+      "key": "qwen05",
+      "paper_label": "Qwen2.5-0.5B",
+      "hf_id": "Qwen/Qwen2.5-0.5B",
+      "local_directory": "models/Qwen2.5-0.5B"
+    },
+    {
+      "key": "qwen15",
+      "paper_label": "Qwen2.5-1.5B",
+      "hf_id": "Qwen/Qwen2.5-1.5B",
+      "local_directory": "models/Qwen2.5-1.5B"
+    },
+    {
+      "key": "smollm",
+      "paper_label": "SmolLM2-1.7B",
+      "hf_id": "HuggingFaceTB/SmolLM2-1.7B",
+      "local_directory": "models/SmolLM-1.7B",
+      "storage_name_note": "The local directory retains the historical SmolLM-1.7B prefix; it contains SmolLM2-1.7B."
+    }
+  ],
+  "boundary_models": [
+    {
+      "key": "gemma2",
+      "paper_label": "Gemma-2-2B-it",
+      "hf_id": "google/gemma-2-2b-it",
+      "role": "boundary-family check; not required for the primary reproduction path"
+    },
+    {
+      "key": "tinyllama",
+      "paper_label": "TinyLlama-1.1B intermediate",
+      "hf_id": "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
+      "role": "floor-effect check; not required for the primary reproduction path"
+    }
+  ],
+  "provenance_limitations": {
+    "checkpoint_revisions": "The original local downloads did not record Hugging Face commit hashes. This release therefore records canonical model identifiers but does not claim byte-identical checkpoint provenance. Future reruns should record snapshot revisions before quantization.",
+    "dataset_revision": "The release fixes GSM8K document indices and protocol, but the original cached dataset revision was not retained. Future reruns should record the Hugging Face dataset fingerprint."
+  },
+  "calibration": {
+    "dataset": "wikitext/wikitext-2-raw-v1",
+    "split": "train",
+    "samples": 128,
+    "seed": 42,
+    "max_length": 2048
+  },
+  "quantization": {
+    "gptq_weight_bits": 4,
+    "group_size": 128,
+    "sg_mmp": "Sensitive transformer layers are W8; other q/k/v projections are W8; o/gate/up/down projections are GPTQ-W4."
+  },
+  "direct_gsm8k_500": {
+    "dataset": "openai/gsm8k",
+    "configuration": "main",
+    "split": "test",
+    "test_size": 1319,
+    "selection_seed": 20260615,
+    "selection": "sorted(random.Random(seed).shuffle(range(1319))[:500])",
+    "few_shot_examples": "first five rows of the GSM8K training split",
+    "decoding": "greedy, max_new_tokens=256",
+    "statistics": "two-sided exact McNemar test and 10,000 paired bootstrap resamples"
+  },
+  "published_sensitive_layer_sets": {
+    "qwen05": [2, 6, 7, 11],
+    "qwen15": [2, 7, 8, 13],
+    "smollm": [2, 6, 7, 11]
+  },
+  "selection_note": "The original Qwen2.5-0.5B sensitivity screen used the first 300 GSM8K test documents. The release includes a 381-example non-overlap robustness analysis; it must be reported alongside, rather than treating the full 500-example direct result as completely selection-independent."
+}
