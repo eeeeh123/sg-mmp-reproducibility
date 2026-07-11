@@ -1,10 +1,10 @@
 # Zenodo release checklist
 
-Create the Zenodo record from the immutable `v1.1.0` source snapshot after the
+Create a new Zenodo version from the immutable `v1.2.0` source snapshot after the
 checksums have been regenerated and verified. The manual-upload asset is:
 
 ```text
-sg-mmp-reproducibility-v1.1.0.zip
+sg-mmp-reproducibility-v1.2.0.zip
 ```
 
 It contains source code, documentation, configuration, and released derived
@@ -18,7 +18,7 @@ Before uploading:
 python scripts/reproduce_core.py verify-public
 ```
 
-Use Zenodo resource type **Software**, version `1.1.0`, the creators and
+Use Zenodo resource type **Software**, version `1.2.0`, the creators and
 keywords in `zenodo.json`, and the MIT license included in this package. After
 the matching GitHub tag is pushed, add its exact tag URL in the Zenodo record;
 do not link to a moving `main` branch as the archival source.

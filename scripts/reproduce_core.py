@@ -153,6 +153,7 @@ def analyze(dry_run: bool) -> None:
 
 def figures(dry_run: bool) -> None:
     run([sys.executable, "scripts/generate_figures.py"], dry_run)
+    run([sys.executable, "scripts/generate_concept_figures.py"], dry_run)
 
 
 def sha256(path: Path) -> str:

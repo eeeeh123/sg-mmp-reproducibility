@@ -1,6 +1,6 @@
 # SG-MMP Reproducibility Package
 
-Version `1.1.0` of the code and derived results supporting *Reasoning
+Version `1.2.0` of the code and derived results supporting *Reasoning
 Fragility in Quantized Small Language Models: Diagnosis and
 Sensitivity-Guided Mixed-Precision Repair*.
 
@@ -10,7 +10,7 @@ Two reproduction paths are deliberately separated:
 
 1. **Public-artifact verification, no GPU or checkpoints required.** Recompute
    the paired GSM8K-500 statistics from redacted per-example outcomes and
-   regenerate all figures.
+   regenerate all manuscript figures backed by the released numerical data.
 2. **End-to-end model rerun.** Download the three primary checkpoints, cache
    public datasets, regenerate GPTQ and SG-MMP states, and run direct
    GSM8K-500 evaluation.
@@ -44,7 +44,10 @@ python scripts/reproduce_core.py figures
 
 `verify-public` validates every source-file checksum and confirms that the
 released redacted outcomes reproduce the paired-statistics JSON byte-for-byte.
-Generated figures are written to the ignored local `figures/` directory.
+Generated figures are written to the ignored local `figures/` directory. The
+quantitative result plots are produced by `scripts/generate_figures.py`; the
+study-overview, precision-policy, and error-propagation figures are produced by
+`scripts/generate_concept_figures.py` from the same released JSON/CSV sources.
 
 ## End-to-end rerun
 

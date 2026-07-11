@@ -40,7 +40,9 @@ python scripts/reproduce_core.py figures
 The first command validates `SHA256SUMS` and recomputes
 `data/processed/gsm8k500/recomputed_paired_stats.json` from
 `per_example_correctness.csv`. The second command creates ignored local figure
-files from released summaries only.
+files from released summaries only. It runs both `scripts/generate_figures.py`
+for the quantitative result plots and `scripts/generate_concept_figures.py`
+for the study-overview, precision-policy, and error-propagation figures.
 
 ## End-to-end rerun path
 
