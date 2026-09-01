@@ -11,7 +11,7 @@ from experiments.revision_full.make_server_plan import commands
 from experiments.revision_full.protocol import MODEL_SPECS
 
 
-SETUP_COMMANDS = 4
+SETUP_COMMANDS = 5
 
 
 def shard_commands(models: list[str], include_setup: bool = False) -> list[str]:

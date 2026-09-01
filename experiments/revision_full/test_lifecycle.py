@@ -1,8 +1,10 @@
 import json
 import shutil
+import sys
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from experiments.revision_full import lifecycle, protocol, run as revision_run
@@ -267,6 +269,47 @@ class LifecycleTests(unittest.TestCase):
 
 
 class ServerPlanLifecycleTests(unittest.TestCase):
+    def test_run_json_writes_use_atomic_replace(self):
+        temporary = protocol.OUT / f".test_atomic_json_{uuid.uuid4().hex}"
+        path = temporary / "record.json"
+        real_replace = revision_run.os.replace
+        try:
+            with patch.object(
+                revision_run.os, "replace", wraps=real_replace
+            ) as replace:
+                revision_run.write_json(path, {"ready": True})
+            replace.assert_called_once()
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"ready": True})
+            self.assertEqual(list(temporary.glob("*.tmp")), [])
+        finally:
+            shutil.rmtree(temporary, ignore_errors=True)
+
+    def test_ram_builder_lock_releases_when_available_ram_is_too_low(self):
+        calls = []
+        fake_fcntl = SimpleNamespace(
+            LOCK_EX=1,
+            LOCK_UN=2,
+            flock=lambda _descriptor, mode: calls.append(mode),
+        )
+        temporary = protocol.OUT / f".test_ram_lock_{uuid.uuid4().hex}"
+        temporary.mkdir(parents=True)
+        try:
+            with (
+                patch.object(revision_run, "MAX_CONCURRENT_RAM_BUILDERS", 1),
+                patch.object(revision_run, "MIN_AVAILABLE_RAM_GIB", 24),
+                patch.object(revision_run, "OUT", temporary),
+                patch.object(revision_run, "system_available_ram_gib", return_value=23),
+                patch.object(revision_run, "supports_posix_file_lock", return_value=True),
+                patch.object(revision_run, "status"),
+                patch.dict(sys.modules, {"fcntl": fake_fcntl}),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "Only 23.0 GiB"):
+                    with revision_run.ram_builder_slot("build-bank", "gemma2", 41):
+                        self.fail("the low-RAM guard must fail before the builder runs")
+        finally:
+            shutil.rmtree(temporary, ignore_errors=True)
+        self.assertEqual(calls, [fake_fcntl.LOCK_EX, fake_fcntl.LOCK_UN])
+
     def test_complete_full_result_skips_before_state_lookup(self):
         with (
             patch.object(revision_run, "require_locked_batch"),
@@ -322,15 +365,40 @@ class ServerPlanLifecycleTests(unittest.TestCase):
         )
         self.assertLess(causal, cleanup)
 
+    def test_plan_runs_hardware_preflight_before_any_model_command(self):
+        plan = list(commands())
+        hardware = plan.index(
+            "python experiments/revision_full/server_preflight.py "
+            "--expected-gpus 2 --concurrent-models 2"
+        )
+        first_model = next(
+            index for index, command in enumerate(plan) if "--model " in command
+        )
+        self.assertLess(hardware, first_model)
+
     def test_two_gpu_shards_partition_every_model_command(self):
         gpu0 = shard_commands(["gemma2", "qwen05"])
         gpu1 = shard_commands(["smollm", "qwen15"])
+        self.assertEqual(len(gpu0), len(set(gpu0)))
+        self.assertEqual(len(gpu1), len(set(gpu1)))
         self.assertFalse(set(gpu0) & set(gpu1))
         model_commands = {
             command for command in commands() if "--model " in command
         }
         self.assertEqual(set(gpu0) | set(gpu1), model_commands)
         self.assertFalse(any("analyze.py" in command for command in gpu0 + gpu1))
+
+    def test_shard_setup_includes_both_preflight_gates(self):
+        shard = shard_commands(["qwen05"], include_setup=True)
+        self.assertIn(
+            "python experiments/revision_full/server_preflight.py "
+            "--expected-gpus 2 --concurrent-models 2",
+            shard,
+        )
+        self.assertIn(
+            "python experiments/revision_full/readiness.py --stage preflight",
+            shard,
+        )
 
 
 if __name__ == "__main__":

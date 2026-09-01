@@ -81,6 +81,10 @@ def commands():
     yield 'python -m unittest discover -s experiments/revision_full -p "test*.py" -v'
     yield "python experiments/revision_full/run.py prepare"
     yield "python experiments/revision_full/format_control.py --prepare-only"
+    yield (
+        "python experiments/revision_full/server_preflight.py "
+        "--expected-gpus 2 --concurrent-models 2"
+    )
     yield "python experiments/revision_full/readiness.py --stage preflight"
 
     for model in MODEL_SPECS:

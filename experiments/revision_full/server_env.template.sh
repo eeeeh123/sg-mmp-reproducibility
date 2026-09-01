@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Copy to server_env.sh on the server, edit storage paths if needed, and source
-# the same file in setup, smoke-test, and both formal-run sessions.
+# Copy to server_env.sh on the server and source it only after online model/data
+# staging is complete. Edit these two paths if the checkout is moved.
 
-export HF_HOME="/data/$USER/huggingface"
+export REVISION_FULL_PROJECT_DIR="/data/experiment/LQ/sg-mmp-reproducibility"
+export REVISION_FULL_STORAGE_ROOT="/data/experiment/LQ"
+export HF_HOME="$REVISION_FULL_STORAGE_ROOT/huggingface"
 export HF_DATASETS_CACHE="$HF_HOME/datasets"
 export HF_HUB_CACHE="$HF_HOME/hub"
 export HF_HUB_OFFLINE=1

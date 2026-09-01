@@ -62,6 +62,10 @@ if MAX_CONCURRENT_RAM_BUILDERS <= 0:
     raise ValueError("REVISION_FULL_MAX_CONCURRENT_RAM_BUILDERS must be positive")
 if MIN_AVAILABLE_RAM_GIB < 0:
     raise ValueError("REVISION_FULL_MIN_AVAILABLE_RAM_GIB cannot be negative")
+if MAX_CONCURRENT_RAM_BUILDERS == 1 and MIN_AVAILABLE_RAM_GIB < 24:
+    raise ValueError(
+        "single RAM-builder mode requires REVISION_FULL_MIN_AVAILABLE_RAM_GIB >= 24"
+    )
 
 BROAD_TASKS = (
     "arc_challenge",

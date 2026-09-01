@@ -45,6 +45,8 @@ EXPECTED_VERSIONS = {
     "accelerate": "1.13.0",
     "safetensors": "0.7.0",
     "sentencepiece": "0.2.1",
+    "matplotlib": "3.10.8",
+    "peft": "0.19.1",
 }
 MIN_GPU_GIB = 16
 RECOMMENDED_GPU_GIB = 23
@@ -71,7 +73,9 @@ def storage_thresholds(
 
 
 def ram_thresholds(
-    concurrent_models: int, max_concurrent_ram_builders: int
+    concurrent_models: int,
+    max_concurrent_ram_builders: int,
+    configured_min_available_gib: float = MIN_AVAILABLE_RAM_GIB,
 ) -> dict:
     """Capacity gates for full-concurrency and low-RAM staggered execution."""
     if max_concurrent_ram_builders not in {1, concurrent_models}:
@@ -83,7 +87,11 @@ def ram_thresholds(
             "mode": "serialized_ram_builders_with_parallel_gpu_evaluation",
             "minimum_total_gib": max(30, 22 + 4 * concurrent_models),
             "recommended_total_gib": max(48, 32 + 8 * concurrent_models),
-            "minimum_available_gib": max(24, 16 + 4 * concurrent_models),
+            "minimum_available_gib": max(
+                configured_min_available_gib,
+                24,
+                16 + 4 * concurrent_models,
+            ),
             "recommended_available_gib": max(32, 24 + 4 * concurrent_models),
         }
     return {
@@ -165,29 +173,30 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--expected-gpus", type=int, default=1)
     parser.add_argument("--concurrent-models", type=int, default=1)
-    parser.add_argument(
-        "--max-concurrent-ram-builders",
-        type=int,
-        default=MAX_CONCURRENT_RAM_BUILDERS,
-    )
     args = parser.parse_args()
     if not 1 <= args.concurrent_models <= len(MODEL_SPECS):
         raise SystemExit("--concurrent-models must be between 1 and 4")
     if args.expected_gpus < args.concurrent_models:
         raise SystemExit("--expected-gpus must be at least --concurrent-models")
-    if args.max_concurrent_ram_builders not in {1, args.concurrent_models}:
+    if MAX_CONCURRENT_RAM_BUILDERS not in {1, args.concurrent_models}:
         raise SystemExit(
-            "--max-concurrent-ram-builders must be 1 or equal --concurrent-models"
+            "REVISION_FULL_MAX_CONCURRENT_RAM_BUILDERS must be 1 or equal "
+            "--concurrent-models"
         )
     errors: list[str] = []
     warnings: list[str] = []
+    if sys.version_info[:2] != (3, 12):
+        errors.append(
+            f"Python {sys.version_info.major}.{sys.version_info.minor} is active; "
+            "the tested server environment requires Python 3.12"
+        )
     packages = {}
     for module_name, expected in EXPECTED_VERSIONS.items():
         try:
             actual = version_of(module_name)
             packages[module_name] = actual
             if actual != expected:
-                warnings.append(f"{module_name}={actual}, tested lock is {expected}")
+                errors.append(f"{module_name}={actual}, required lock is {expected}")
         except Exception as exc:
             errors.append(f"cannot import {module_name}: {exc}")
 
@@ -357,7 +366,7 @@ def main() -> None:
 
     ram_gib, available_ram_gib = system_memory_gib()
     ram = ram_thresholds(
-        args.concurrent_models, args.max_concurrent_ram_builders
+        args.concurrent_models, MAX_CONCURRENT_RAM_BUILDERS
     )
     minimum_ram_gib = ram["minimum_total_gib"]
     recommended_ram_gib = ram["recommended_total_gib"]
@@ -385,7 +394,7 @@ def main() -> None:
             f"{available_ram_gib:.1f} GiB RAM is currently available; "
             f"{ram['recommended_available_gib']} GiB is recommended"
         )
-    if args.max_concurrent_ram_builders == 1:
+    if MAX_CONCURRENT_RAM_BUILDERS == 1:
         if MIN_AVAILABLE_RAM_GIB < ram["minimum_available_gib"]:
             errors.append(
                 "REVISION_FULL_MIN_AVAILABLE_RAM_GIB is below the preflight safety floor"
@@ -416,7 +425,7 @@ def main() -> None:
             "expected_gpus": args.expected_gpus,
             "concurrent_models": args.concurrent_models,
             "ram_execution_mode": ram["mode"],
-            "max_concurrent_ram_builders": args.max_concurrent_ram_builders,
+            "max_concurrent_ram_builders": MAX_CONCURRENT_RAM_BUILDERS,
             "concurrent_model_state_peaks_gib": [
                 round(value, 2) for value in concurrent_peaks
             ],

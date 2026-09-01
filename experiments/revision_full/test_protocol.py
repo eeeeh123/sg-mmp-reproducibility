@@ -2,6 +2,7 @@
 
 import unittest
 
+from experiments.revision_full import protocol
 from experiments.revision_full.protocol import (
     CALIB_SEEDS,
     CAUSAL_PATCH_N,
@@ -16,7 +17,11 @@ from experiments.revision_full.protocol import (
     scored_budget_match,
     select_layers_under_budget,
 )
-from experiments.revision_full.server_preflight import ram_thresholds, storage_thresholds
+from experiments.revision_full.server_preflight import (
+    EXPECTED_VERSIONS,
+    ram_thresholds,
+    storage_thresholds,
+)
 from experiments.revision_full.download_core_datasets import snapshot_sha256
 from experiments.revision_full.download_models import stable_model_record
 
@@ -136,9 +141,24 @@ class ProtocolTests(unittest.TestCase):
         )
         self.assertEqual(low_ram["minimum_total_gib"], 30)
         self.assertEqual(low_ram["minimum_available_gib"], 24)
+        stricter = ram_thresholds(2, 1, configured_min_available_gib=28)
+        self.assertEqual(stricter["minimum_available_gib"], 28)
         full_concurrency = ram_thresholds(2, 2)
         self.assertEqual(full_concurrency["minimum_total_gib"], 64)
         self.assertEqual(full_concurrency["minimum_available_gib"], 48)
+
+    def test_preflight_version_lock_matches_server_requirements(self):
+        requirements = {}
+        for line in (protocol.ROOT / "requirements-server.txt").read_text(
+            encoding="utf-8"
+        ).splitlines():
+            if "==" in line:
+                package, version = line.split("==", 1)
+                requirements[package] = version
+        distributions = {"lm_eval": "lm-eval"}
+        for module, version in EXPECTED_VERSIONS.items():
+            package = distributions.get(module, module)
+            self.assertEqual(requirements.get(package), version)
 
     def test_dataset_identity_ignores_cache_path_and_creation_time(self):
         def manifest(path, created):

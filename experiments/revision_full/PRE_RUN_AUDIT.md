@@ -65,7 +65,8 @@ TaCQ 官方流程会生成接近 checkpoint 尺度的重要性文件，不计入
 3. 核心与八个 panel 任务均已下载、记录 cache hash，并在 offline 模式可解析。
 4. 四模型 smoke 在最终 batch 设置下通过。
 5. `server_preflight.py --expected-gpus 2 --concurrent-models 2` 输出 `"ready": true`。
-6. 两个 shard 无模型重叠，使用同一 protocol lock、数据 manifest 和环境变量。
-7. 不存在要保留的旧 v4 部分输出；如存在，先让 readiness/断点校验决定是否可续跑，不手工拼文件。
+6. 31-GiB 主机已单独完成 `gemma2/c41` 正式 precision-bank pilot，并在该文件落盘后再次通过双卡 preflight；该银行随后原样复用，不是废弃试跑。
+7. 两个 shard 无模型重叠，使用同一 protocol lock、数据 manifest 和环境变量。
+8. 不存在要保留的旧 v4 部分输出；如存在，先让 readiness/断点校验决定是否可续跑，不手工拼文件。
 
 任何一项不满足均为 **NO-GO**。代码无法提前保证第三方仓库适配或真实 GPU 驱动行为，但 smoke、预检、精确结果契约和阶段 gate 会把这些问题暴露在昂贵矩阵开始前，或阻止错误结果被误当成完成。

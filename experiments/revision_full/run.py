@@ -103,7 +103,14 @@ ROLE_PRIORITY_VARIANTS = {
 
 def write_json(path: Path, value) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def read_json(path: Path):
@@ -247,13 +254,17 @@ def system_available_ram_gib() -> float | None:
     return None
 
 
+def supports_posix_file_lock() -> bool:
+    return os.name == "posix"
+
+
 @contextmanager
 def ram_builder_slot(stage: str, model_key: str, calib_seed: int):
     """Serialize activation-heavy state builders across the two GPU workers."""
     if MAX_CONCURRENT_RAM_BUILDERS != 1:
         yield
         return
-    if os.name != "posix":
+    if not supports_posix_file_lock():
         raise RuntimeError(
             "The single RAM-builder mode requires a POSIX server with fcntl locking"
         )

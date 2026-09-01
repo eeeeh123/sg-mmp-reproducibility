@@ -4,7 +4,7 @@ This guide is for `revision-full-v4`. Run commands from the repository root. Do 
 
 ## Capacity and realistic duration
 
-The frozen plan contains 522 commands, including 100 fail-closed state/bank/screen cleanup checkpoints. The expensive work is not the cleanup:
+The frozen plan contains 523 commands, including 100 fail-closed state/bank/screen cleanup checkpoints. The expensive work is not the cleanup:
 
 - 81,408 train-only generations for native layer screening;
 - 105,520 complete-test generations for 80 FP16/core/placement runs;
@@ -22,9 +22,9 @@ System RAM and disk free space are independent capacities: for example, `31 GiB`
 ## 1. Clone source and create the environment
 
 ```bash
-cd /data/$USER
-git clone https://github.com/eeeeh123/sg-mmp-reproducibility.git ptq-benchmark
-cd ptq-benchmark
+cd /data/experiment/LQ
+git clone https://github.com/eeeeh123/sg-mmp-reproducibility.git
+cd sg-mmp-reproducibility
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
@@ -34,7 +34,7 @@ python -m pip install -r requirements-server.txt
 Set every cache inside the allocated large filesystem:
 
 ```bash
-export HF_HOME=/data/$USER/huggingface
+export HF_HOME=/data/experiment/LQ/huggingface
 export HF_DATASETS_CACHE=$HF_HOME/datasets
 export HF_HUB_CACHE=$HF_HOME/hub
 mkdir -p "$HF_DATASETS_CACHE" "$HF_HUB_CACHE"
@@ -77,6 +77,7 @@ export REVISION_FULL_FORMAT_BATCH_SIZE=2
 export REVISION_FULL_MAX_CONCURRENT_RAM_BUILDERS=1
 export REVISION_FULL_MIN_AVAILABLE_RAM_GIB=24
 cp experiments/revision_full/server_env.template.sh server_env.sh
+source server_env.sh
 ```
 
 Smoke all architectures using GSM8K train only. The commands may be run in two terminals, one sequence per GPU:
@@ -93,6 +94,7 @@ If any smoke test OOMs, change the environment globally and in `server_env.sh` t
 ## 4. Lock, verify, and make the GO/NO-GO decision
 
 ```bash
+source server_env.sh
 python -m unittest discover -s experiments/revision_full -p "test*.py" -v
 python experiments/revision_full/run.py prepare --force
 python experiments/revision_full/format_control.py --prepare-only --force
@@ -110,13 +112,25 @@ CUDA_VISIBLE_DEVICES=0 python experiments/revision_full/run.py build-screen-bank
 CUDA_VISIBLE_DEVICES=1 python experiments/revision_full/run.py build-screen-bank --model smollm --split-id 0 --calib-seed 41
 ```
 
-The RAM-builder lock intentionally lets only one of these commands build at a time; the other prints `ram_builder_wait` and continues after the first releases the lock. This validates real calibration, quantization, CUDA, RAM, the lock, and state writes before hundreds of evaluations. The later shards validate and reuse these exact formal states, so the pilot is not discarded work. The first full precision-bank build remains the largest RAM validation; its runtime guard refuses to start if `MemAvailable` is below 24 GiB. If it fails, already completed, provenance-valid screen evidence remains resumable.
+The RAM-builder lock intentionally lets only one of these commands build at a time; the other prints `ram_builder_wait` and continues after the first releases the lock. This validates real calibration, quantization, CUDA, RAM, the lock, and state writes before hundreds of evaluations. The later shards validate and reuse these exact formal states, so the pilot is not discarded work.
+
+On the 31-GiB host, also build the largest estimated full precision bank **before** launching either long shard:
+
+```bash
+source server_env.sh
+CUDA_VISIBLE_DEVICES=0 python experiments/revision_full/run.py build-bank --model gemma2 --calib-seed 41
+free -h
+python experiments/revision_full/server_preflight.py --expected-gpus 2 --concurrent-models 2
+```
+
+`build-bank` depends only on the frozen protocol, checkpoint, and WikiText calibration—not on the later layer selection—so this is valid preregistered work and the Gemma shard will reuse it byte-for-byte. It is the mandatory empirical RAM acceptance test that local CPU-only unit tests cannot replace. Its runtime guard refuses to start below 24 GiB `MemAvailable`. The repeated preflight verifies the bank metadata and remaining disk after the real peak artifact exists. If the pilot or repeated preflight fails, do not launch the shards; no test-set accuracy has been generated and no other valid evidence needs to be rerun.
 
 ## 5. Generate two non-overlapping model shards
 
 Use largest-plus-smallest pairing to balance runtime:
 
 ```bash
+source server_env.sh
 mkdir -p server_plans logs
 python experiments/revision_full/make_server_shard.py --models gemma2 qwen05 > server_plans/gpu0.sh
 python experiments/revision_full/make_server_shard.py --models smollm qwen15 > server_plans/gpu1.sh
@@ -125,8 +139,8 @@ python experiments/revision_full/make_server_shard.py --models smollm qwen15 > s
 Start persistent sessions. Ensure the cache, offline, state-directory, and batch exports above are visible inside both sessions (placing them in a small `server_env.sh` and sourcing it is convenient):
 
 ```bash
-tmux new-session -d -s revision_gpu0 "cd /data/$USER/ptq-benchmark && source .venv/bin/activate && source server_env.sh && CUDA_VISIBLE_DEVICES=0 bash server_plans/gpu0.sh 2>&1 | tee logs/gpu0.log"
-tmux new-session -d -s revision_gpu1 "cd /data/$USER/ptq-benchmark && source .venv/bin/activate && source server_env.sh && CUDA_VISIBLE_DEVICES=1 bash server_plans/gpu1.sh 2>&1 | tee logs/gpu1.log"
+tmux new-session -d -s revision_gpu0 "cd /data/experiment/LQ/sg-mmp-reproducibility && source .venv/bin/activate && source server_env.sh && CUDA_VISIBLE_DEVICES=0 bash server_plans/gpu0.sh 2>&1 | tee logs/gpu0.log"
+tmux new-session -d -s revision_gpu1 "cd /data/experiment/LQ/sg-mmp-reproducibility && source .venv/bin/activate && source server_env.sh && CUDA_VISIBLE_DEVICES=1 bash server_plans/gpu1.sh 2>&1 | tee logs/gpu1.log"
 ```
 
 Each process sees its physical card as `cuda:0`. Model-specific status, runtime summaries, samples, state metadata, and cleanup receipts use separate paths. Dataset/model caches are shared read-only during formal execution. Both GPUs can evaluate simultaneously; only `build-screen-bank` and `build-bank`, which retain calibration activations and growing quantized states in host RAM, are mutually exclusive.
@@ -138,7 +152,7 @@ nvidia-smi
 free -h
 tmux ls
 tail -f logs/gpu0.log
-df -h /data/$USER
+df -h /data/experiment/LQ
 du -sh experiments/revision_full/outputs "${REVISION_FULL_STATE_DIR:-experiments/revision_full/outputs/states}"
 ```
 
