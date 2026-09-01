@@ -2,7 +2,7 @@
 
 ## Hardware and time budget
 
-The resource-aware v3 command plan has 410 resumable commands. Its known GSM8K workload alone contains:
+The resource-aware v3 command plan has 498 resumable commands. The additional 88 commands are fail-closed lifecycle checkpoints that validate evidence and remove reconstructible states; they add negligible GPU work. Its known GSM8K workload alone contains:
 
 - 81,408 train-only generation cases for native layer screening;
 - 105,520 full-test cases across 80 FP16/core/control evaluations;
@@ -14,11 +14,11 @@ This is still a throughput problem rather than a model-capacity problem. Histori
 
 | Configuration | Feasibility | Planning wall time |
 |---|---|---|
-| 1× RTX 3090 24 GiB, 64 GiB RAM, at least 500 GiB free NVMe | Recommended plan for the available laboratory hardware | about 5-13 continuous days; calibrate with the pilot |
+| 1× RTX 3090 24 GiB, 64 GiB RAM, about 100 GiB free persistent storage | Recommended plan for the available laboratory hardware | about 5-13 continuous days; calibrate with the pilot |
 | 1× RTX 3090 24 GiB, 32 GiB RAM | GPU capacity is adequate, but shared-bank construction may pressure host RAM | use a reduced in-memory capture mode only after profiling; 64 GiB RAM is safer |
-| 2× 24 GiB GPUs, 96 GiB RAM, 500 GiB free NVMe | Optional future acceleration | about 3-7 days if model shards run independently |
+| 2× 24 GiB GPUs, 96 GiB RAM, about 150 GiB free persistent storage | Optional future acceleration | about 3-7 days if model shards run independently |
 
-The current state format stores int8 code tensors rather than true packed 4/5/6-bit files. Each bank contains reusable W4/W5/W6/W8 entries, so banks, core states, and controls can still occupy roughly 200-250 GiB before caches and backups. Keep at least 500 GiB free; 1 TiB is preferable if periodic full backups are retained, even though the four source model folders total only about 11.9 GiB.
+The current state format stores int8 code tensors rather than true packed 4/5/6-bit files. Retaining every bank and materialized state would occupy about 161.6 GiB before caches and backups. The lifecycle-aware plan instead keeps one calibration bank plus at most one materialized state. The largest estimated state peak is about 9.9 GiB for Gemma; the four source model folders total about 11.9 GiB. Allow roughly 40-80 GiB for source models, the environment, data caches, persistent results, and transient state, and reserve about 100 GiB until the pilot measures the real output/cache sizes.
 
 ## 1. Clone code; do not put model weights in GitHub
 
@@ -49,6 +49,18 @@ mkdir -p "$HF_DATASETS_CACHE" "$HF_HUB_CACHE"
 ```
 
 Persist these exports in the job script or shell profile used for the experiment.
+
+Optionally place reconstructible `.pt` files on node-local scratch while keeping
+results, metadata, and cleanup receipts in the repository output directory:
+
+```bash
+export REVISION_FULL_STATE_DIR=/scratch/$USER/sg-mmp-revision-states
+mkdir -p "$REVISION_FULL_STATE_DIR"
+```
+
+If `/scratch` is erased when a scheduler job ends, completed evidence is still
+safe on persistent storage. An interrupted state may need to be rebuilt, so use
+scratch only for a job that keeps the same node or accept that recomputation risk.
 
 ## 2. Download models directly on the server
 
@@ -114,7 +126,7 @@ python experiments/revision_full/make_server_plan.py > server_all.sh
 CUDA_VISIBLE_DEVICES=0 bash server_all.sh 2>&1 | tee server_all.log
 ```
 
-This is resumable but long. Completed screens, per-item generations, task panels, and atomic quantized states are skipped when rerun. Do not add `--force` when resuming a normal interruption.
+This is resumable but long. The generated script enables `set -euo pipefail`, so any experiment or cleanup-gate failure stops the sequence before another state is created. Each cleanup checkpoint first validates the exact required item IDs and downstream panels, hashes the retained evidence, writes a persistent receipt, and only then deletes the reconstructible `.pt`. On rerun, completed evidence is checked before state existence, so cleaned states are not rebuilt. Do not add `--force` when resuming a normal interruption.
 
 ## 5. Optional multi-GPU execution
 
@@ -177,4 +189,4 @@ On Windows PowerShell:
 scp username@server:/data/username/ptq-benchmark/revision_full_outputs.tar.gz .
 ```
 
-Keep periodic copies of `experiments/revision_full/outputs/`. Precision banks and states are expensive to reproduce; sample JSONL files are the irreplaceable basis of paired statistical analysis.
+Keep periodic copies of `experiments/revision_full/outputs/`. The sample JSONL files are the irreplaceable basis of paired statistical analysis; `state_metadata/` and `lifecycle_receipts/` document how deleted states can be regenerated. Precision-bank and materialized `.pt` files are intentionally transient and need not be backed up.

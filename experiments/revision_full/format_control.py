@@ -18,7 +18,13 @@ from pathlib import Path
 sys.path.insert(0, ".")
 
 from experiments.fix_gsm8k_500.direct_eval import gold_answer
-from experiments.revision_full.protocol import GSM8K_TEST_SIZE, MODEL_SPECS, RESULTS_DIR
+from experiments.revision_full.lifecycle import format_complete
+from experiments.revision_full.protocol import (
+    GSM8K_TEST_SIZE,
+    MODEL_SPECS,
+    RESULTS_DIR,
+    method_id,
+)
 from experiments.revision_full.run import configure_direct_eval, get_dataset
 
 
@@ -233,8 +239,12 @@ def evaluate(
 ) -> None:
     from ptq.eval import cleanup_gpu
 
-    direct, method = configure_direct_eval(model_key, variant, calib_seed)
+    method = method_id(variant, calib_seed)
     path = output_path(model_key, method)
+    if not force and format_complete(model_key, variant, calib_seed):
+        print(f"[skip] complete format control: {path}", flush=True)
+        return
+    direct, method = configure_direct_eval(model_key, variant, calib_seed)
     if force and path.exists():
         path.unlink()
     completed = done_ids(path)

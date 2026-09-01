@@ -66,6 +66,8 @@ Automatic error analysis covers all 1,319 seed-41 W4/SG-MMP item transitions, pa
 | `outputs/results/extra/` | Four complete task records with logged samples |
 | `outputs/results/causal_patch/` | 200 preregistered items and every decoder layer |
 | `outputs/external_baselines/` | Hash-verified official baseline provenance and canonical samples |
+| `outputs/state_metadata/` | Persistent protocol, budget, seed, and source-bank metadata for reconstructible states |
+| `outputs/lifecycle_receipts/` | SHA256-identified evidence that passed before each transient `.pt` deletion |
 | `outputs/analysis_full.md` | Paired, hierarchical, random-control, format-interaction, and external comparisons |
 | `readiness.py --stage core` | No missing internal run |
 | `readiness.py --stage resubmission` | TaCQ, HAWQ-V2, and human annotation also complete |

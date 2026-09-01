@@ -13,6 +13,63 @@ from experiments.revision_full.protocol import (
 )
 
 
+CONTROL_VARIANTS = (
+    "qkv_only",
+    "o_only",
+    "ffn_only",
+    "qkv_priority_matched",
+    "o_priority_matched",
+    "ffn_priority_matched",
+    "hessian_diag_matched",
+)
+
+
+def state_cycle(
+    model: str,
+    seed: int,
+    variant: str,
+    *,
+    panels: bool = False,
+    causal: bool = False,
+):
+    if variant in {"gptq_w5", "gptq_w6"}:
+        yield (
+            "python experiments/revision_full/run.py quantize-uniform "
+            f"--model {model} --calib-seed {seed} --bits {variant[-1]}"
+        )
+    else:
+        yield (
+            "python experiments/revision_full/run.py materialize "
+            f"--model {model} --calib-seed {seed} --variant {variant}"
+        )
+    yield (
+        "python experiments/revision_full/run.py evaluate-full "
+        f"--model {model} --variant {variant} --calib-seed {seed}"
+    )
+    if panels:
+        yield (
+            "python experiments/revision_full/run.py evaluate-broad "
+            f"--model {model} --variant {variant} --calib-seed {seed}"
+        )
+        yield (
+            "python experiments/revision_full/run.py evaluate-extra "
+            f"--model {model} --variant {variant} --calib-seed {seed}"
+        )
+        yield (
+            "python experiments/revision_full/format_control.py "
+            f"--model {model} --variant {variant} --calib-seed {seed}"
+        )
+    if causal:
+        yield (
+            "python experiments/revision_full/causal_patch.py run "
+            f"--model {model} --calib-seed {seed}"
+        )
+    yield (
+        "python experiments/revision_full/run.py cleanup-state "
+        f"--model {model} --calib-seed {seed} --variant {variant}"
+    )
+
+
 def commands():
     yield 'python -m unittest discover -s experiments/revision_full -p "test*.py" -v'
     yield "python experiments/revision_full/run.py prepare"
@@ -31,44 +88,37 @@ def commands():
             "python experiments/revision_full/run.py evaluate-full "
             f"--model {model} --variant fp16"
         )
-        for seed in CALIB_SEEDS:
+        for command in [
+            "evaluate-broad",
+            "evaluate-extra",
+        ]:
+            yield (
+                f"python experiments/revision_full/run.py {command} "
+                f"--model {model} --variant fp16"
+            )
+        yield (
+            "python experiments/revision_full/format_control.py "
+            f"--model {model} --variant fp16"
+        )
+
+        for seed in [value for value in CALIB_SEEDS if value != RANDOM_CALIB_SEED]:
             yield (
                 "python experiments/revision_full/run.py build-bank "
                 f"--model {model} --calib-seed {seed}"
             )
-            for variant in ["gptq_w4", "sg_mmp"]:
-                yield (
-                    "python experiments/revision_full/run.py materialize "
-                    f"--model {model} --calib-seed {seed} --variant {variant}"
-                )
-            for bits in [5, 6]:
-                yield (
-                    "python experiments/revision_full/run.py quantize-uniform "
-                    f"--model {model} --calib-seed {seed} --bits {bits}"
-                )
             for variant in ["gptq_w4", "gptq_w5", "gptq_w6", "sg_mmp"]:
-                yield (
-                    "python experiments/revision_full/run.py evaluate-full "
-                    f"--model {model} --variant {variant} --calib-seed {seed}"
-                )
+                yield from state_cycle(model, seed, variant)
+            yield (
+                "python experiments/revision_full/run.py cleanup-bank "
+                f"--model {model} --calib-seed {seed}"
+            )
 
-        for variant in [
-            "qkv_only",
-            "o_only",
-            "ffn_only",
-            "qkv_priority_matched",
-            "o_priority_matched",
-            "ffn_priority_matched",
-            "hessian_diag_matched",
-        ]:
-            yield (
-                "python experiments/revision_full/run.py materialize "
-                f"--model {model} --calib-seed {RANDOM_CALIB_SEED} --variant {variant}"
-            )
-            yield (
-                "python experiments/revision_full/run.py evaluate-full "
-                f"--model {model} --variant {variant} --calib-seed {RANDOM_CALIB_SEED}"
-            )
+        yield (
+            "python experiments/revision_full/run.py build-bank "
+            f"--model {model} --calib-seed {RANDOM_CALIB_SEED}"
+        )
+        for variant in ["gptq_w5", "gptq_w6", *CONTROL_VARIANTS]:
+            yield from state_cycle(model, RANDOM_CALIB_SEED, variant)
 
         if MODEL_SPECS[model]["role"] == "primary":
             for allocation_id in range(RANDOM_ALLOCATIONS):
@@ -79,23 +129,20 @@ def commands():
                         f"--model {model} --variant {variant} --calib-seed {RANDOM_CALIB_SEED}"
                     )
 
-        for variant, seed_arg in [
-            ("fp16", ""),
-            ("gptq_w4", f" --calib-seed {RANDOM_CALIB_SEED}"),
-            ("sg_mmp", f" --calib-seed {RANDOM_CALIB_SEED}"),
-        ]:
-            yield (
-                "python experiments/revision_full/run.py evaluate-broad "
-                f"--model {model} --variant {variant}{seed_arg}"
-            )
-            yield (
-                "python experiments/revision_full/run.py evaluate-extra "
-                f"--model {model} --variant {variant}{seed_arg}"
-            )
-            yield (
-                "python experiments/revision_full/format_control.py "
-                f"--model {model} --variant {variant}{seed_arg}"
-            )
+        yield from state_cycle(
+            model,
+            RANDOM_CALIB_SEED,
+            "gptq_w4",
+            panels=True,
+            causal=model == "qwen05",
+        )
+        yield from state_cycle(
+            model, RANDOM_CALIB_SEED, "sg_mmp", panels=True
+        )
+        yield (
+            "python experiments/revision_full/run.py cleanup-bank "
+            f"--model {model} --calib-seed {RANDOM_CALIB_SEED}"
+        )
 
         if MODEL_SPECS[model]["role"] == "primary":
             yield (
@@ -103,16 +150,12 @@ def commands():
                 f"--model {model} --calib-seed {RANDOM_CALIB_SEED} --sample-size 200"
             )
 
-        if model == "qwen05":
-            yield (
-                "python experiments/revision_full/causal_patch.py run "
-                f"--model {model} --calib-seed {RANDOM_CALIB_SEED}"
-            )
-
     yield "python experiments/revision_full/analyze.py"
     yield "python experiments/revision_full/readiness.py --stage core"
 
 
 if __name__ == "__main__":
+    print("#!/usr/bin/env bash")
+    print("set -euo pipefail")
     for command in commands():
         print(command)

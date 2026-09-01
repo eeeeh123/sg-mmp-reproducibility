@@ -79,6 +79,7 @@
       "module": 30
     },
     "model_provenance": "experiments/revision_full/outputs/model_snapshot_manifest.json is generated before experiments and records immutable Hugging Face commit SHAs",
+    "storage_lifecycle": "Quantized .pt files are reconstructible and transient. The serial plan retains one precision bank plus one materialized state, deletes only after exact downstream evidence checks, and stores persistent SHA256 cleanup receipts.",
     "protocol": "experiments/revision_full/EXPERIMENT_PLAN.md"
   }
 }

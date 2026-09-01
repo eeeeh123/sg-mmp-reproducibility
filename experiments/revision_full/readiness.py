@@ -24,6 +24,7 @@ from experiments.revision_full.protocol import (
     RESULTS_DIR,
     SCREEN_N,
     SELECTION_BOOTSTRAP_REPLICATES,
+    STATE_METADATA_DIR,
     method_id,
 )
 from experiments.revision_full.external_baselines import read_samples, sha256
@@ -175,7 +176,7 @@ def preflight_errors() -> list[str]:
     policy = json.loads(POLICY_PATH.read_text(encoding="utf-8"))
     if policy.get("protocol_version") != PROTOCOL_VERSION:
         errors.append("claim policy version does not match protocol")
-    for metadata in OUT.glob("states/**/*.json"):
+    for metadata in STATE_METADATA_DIR.glob("**/*.json"):
         record = json.loads(metadata.read_text(encoding="utf-8"))
         if record.get("protocol_version") != PROTOCOL_VERSION:
             errors.append(f"stale state metadata: {metadata}")

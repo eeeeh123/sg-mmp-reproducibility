@@ -85,13 +85,18 @@ python experiments/revision_full/download_models.py --models qwen05 qwen15 smoll
 hf auth login  # required after accepting the Gemma license
 python experiments/revision_full/download_models.py --models gemma2
 python experiments/revision_full/download_core_datasets.py
+export REVISION_FULL_STATE_DIR=/scratch/$USER/sg-mmp-revision-states  # optional
 python experiments/revision_full/server_preflight.py
 python experiments/revision_full/make_server_plan.py > server_all.sh
 CUDA_VISIBLE_DEVICES=0 bash server_all.sh 2>&1 | tee server_all.log
 ```
 
 The downloader records immutable upstream commit SHAs and resumes interrupted
-files. See `experiments/revision_full/SERVER_MIGRATION.md` for the complete
+files. The generated server plan keeps only one materialized quantized state at
+a time, validates and hashes persistent evidence before cleanup, and safely
+skips already-complete work even after reconstructible `.pt` files are removed.
+The largest estimated transient state peak is about 9.9 GiB. See
+`experiments/revision_full/SERVER_MIGRATION.md` for the complete
 single-RTX-3090 workflow and `experiments/revision_full/EXPERIMENT_PLAN.md`
 for the reviewer-facing evidence gates.
 

@@ -41,25 +41,30 @@ python experiments/revision_full/make_server_plan.py
 
 The generated plan contains tests, protocol preparation, preflight, all model runs, analysis, and the final core-results gate. Do not mix commands from `fix_gsm8k_300` or `fix_gsm8k_500` into this run.
 
-The core loop for one model and seed is:
+The core loop is lifecycle-aware. It materializes, consumes, verifies, and
+cleans one state before creating the next:
 
 ```bash
 python experiments/revision_full/run.py screen --model qwen05 --split-id 0
 python experiments/revision_full/run.py screen --model qwen05 --split-id 1
 python experiments/revision_full/run.py screen --model qwen05 --split-id 2
 python experiments/revision_full/run.py select --model qwen05
-python experiments/revision_full/run.py build-bank --model qwen05 --calib-seed 41
-python experiments/revision_full/run.py materialize --model qwen05 --calib-seed 41 --variant gptq_w4
-python experiments/revision_full/run.py materialize --model qwen05 --calib-seed 41 --variant sg_mmp
-python experiments/revision_full/run.py quantize-uniform --model qwen05 --calib-seed 41 --bits 5
-python experiments/revision_full/run.py quantize-uniform --model qwen05 --calib-seed 41 --bits 6
-python experiments/revision_full/run.py evaluate-full --model qwen05 --variant gptq_w4 --calib-seed 41
-python experiments/revision_full/run.py evaluate-full --model qwen05 --variant gptq_w5 --calib-seed 41
-python experiments/revision_full/run.py evaluate-full --model qwen05 --variant gptq_w6 --calib-seed 41
-python experiments/revision_full/run.py evaluate-full --model qwen05 --variant sg_mmp --calib-seed 41
+python experiments/revision_full/run.py build-bank --model qwen05 --calib-seed 97
+python experiments/revision_full/run.py quantize-uniform --model qwen05 --calib-seed 97 --bits 5
+python experiments/revision_full/run.py evaluate-full --model qwen05 --variant gptq_w5 --calib-seed 97
+python experiments/revision_full/run.py cleanup-state --model qwen05 --calib-seed 97 --variant gptq_w5
+# Repeat the materialize/evaluate/cleanup cycle for W4, W6, and SG-MMP.
+python experiments/revision_full/run.py cleanup-bank --model qwen05 --calib-seed 97
 ```
 
 The full plan also runs FP16, all controls, ARC-Challenge/HellaSwag/MMLU, an explicitly reported MMLU high-school-mathematics multiple-choice score, and the full SVAMP/ASDiv/MATH-500/TruthfulQA-generation panel. Per-example logs are mandatory where available.
+
+Set `REVISION_FULL_STATE_DIR` to node-local scratch when available. Quantized
+`.pt` files live there; persistent metadata and SHA256 cleanup receipts remain
+under `outputs/state_metadata/` and `outputs/lifecycle_receipts/`. Deletion is
+fail-closed: incomplete GSM8K IDs, missing panels, or a missing causal diagnostic
+keeps the required state. A normal rerun checks complete evidence before looking
+for a state, so already-cleaned work is not recomputed.
 
 ## Error analysis and causal diagnostic
 

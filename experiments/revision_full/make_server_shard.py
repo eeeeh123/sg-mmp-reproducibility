@@ -20,6 +20,8 @@ def main() -> None:
     parser.add_argument("--include-setup", action="store_true")
     args = parser.parse_args()
     all_commands = list(commands())
+    print("#!/usr/bin/env bash")
+    print("set -euo pipefail")
     if args.include_setup:
         for command in all_commands[:SETUP_COMMANDS]:
             print(command)

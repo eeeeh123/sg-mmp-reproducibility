@@ -50,6 +50,7 @@ from experiments.revision_full.protocol import (
     SELECTION_BOOTSTRAP_REPLICATES,
     SELECTION_BOOTSTRAP_SEED,
     STATE_DIR,
+    STATE_METADATA_DIR,
     TARGET_AVG_BITS,
     average_bits,
     fixed_causal_patch_indices,
@@ -59,11 +60,20 @@ from experiments.revision_full.protocol import (
     role_priority_budget_match,
     scored_budget_match,
     select_layers_under_budget,
+    state_metadata_path,
     state_path,
+)
+from experiments.revision_full.lifecycle import (
+    bank_consumers_complete,
+    broad_complete,
+    cleanup_state_artifact,
+    extra_complete,
+    gsm8k_complete,
+    state_consumers_complete,
 )
 
 
-for directory in [OUT, STATE_DIR, SCREEN_DIR, RESULTS_DIR]:
+for directory in [OUT, STATE_DIR, STATE_METADATA_DIR, SCREEN_DIR, RESULTS_DIR]:
     directory.mkdir(parents=True, exist_ok=True)
 
 LOCK_PATH = OUT / "protocol_lock.json"
@@ -628,7 +638,20 @@ def build_bank(model_key: str, calib_seed: int, force: bool) -> Path:
 
     require_protocol()
     path = state_path(model_key, calib_seed, "precision_bank")
+    metadata_path = state_metadata_path(model_key, calib_seed, "precision_bank")
     if path.exists() and not force:
+        if not metadata_path.exists():
+            raise RuntimeError(
+                f"Precision bank exists without metadata; rerun build-bank --force: {path}"
+            )
+        return path
+    if not force and bank_consumers_complete(model_key, calib_seed):
+        status(
+            "precision_bank_not_needed",
+            model=model_key,
+            calib_seed=calib_seed,
+            reason="all dependent evidence is complete",
+        )
         return path
     configure_determinism(calib_seed)
     model, tokenizer = load_model_tokenizer(model_key)
@@ -649,7 +672,7 @@ def build_bank(model_key: str, calib_seed: int, force: bool) -> Path:
     )
     save_torch_atomic(bank, path)
     write_json(
-        path.with_suffix(".json"),
+        metadata_path,
         {
             "protocol_version": PROTOCOL_VERSION,
             "model_key": model_key,
@@ -784,12 +807,26 @@ def materialize(model_key: str, calib_seed: int, variant: str, force: bool) -> P
             f"random_modules_0..{RANDOM_ALLOCATIONS - 1}"
         )
 
+    output_path = state_path(model_key, calib_seed, variant)
+    metadata_path = state_metadata_path(model_key, calib_seed, variant)
+    if output_path.exists() and not force:
+        if not metadata_path.exists():
+            raise RuntimeError(
+                f"State exists without metadata; rerun materialize --force: {output_path}"
+            )
+        return output_path
+    if not force and state_consumers_complete(model_key, calib_seed, variant):
+        status(
+            "state_not_needed",
+            model=model_key,
+            calib_seed=calib_seed,
+            variant=variant,
+            reason="all dependent evidence is complete",
+        )
+        return output_path
     bank_path = state_path(model_key, calib_seed, "precision_bank")
     if not bank_path.exists():
         raise FileNotFoundError(f"Run build-bank first: {bank_path}")
-    output_path = state_path(model_key, calib_seed, variant)
-    if output_path.exists() and not force:
-        return output_path
     bank = torch.load(bank_path, map_location="cpu", weights_only=False, mmap=True)
     scored_allocation = None
     selected_override = None
@@ -835,7 +872,7 @@ def materialize(model_key: str, calib_seed: int, variant: str, force: bool) -> P
             f"{avg} vs {selection['actual_avg_bits']}"
         )
     write_json(
-        output_path.with_suffix(".json"),
+        metadata_path,
         {
             "protocol_version": PROTOCOL_VERSION,
             "model_key": model_key,
@@ -870,7 +907,21 @@ def quantize_uniform(model_key: str, calib_seed: int, bits: int, force: bool) ->
         raise ValueError("Uniform comparison bits must be 5 or 6")
     variant = f"gptq_w{bits}"
     path = state_path(model_key, calib_seed, variant)
+    metadata_path = state_metadata_path(model_key, calib_seed, variant)
     if path.exists() and not force:
+        if not metadata_path.exists():
+            raise RuntimeError(
+                f"State exists without metadata; rerun quantize-uniform --force: {path}"
+            )
+        return path
+    if not force and state_consumers_complete(model_key, calib_seed, variant):
+        status(
+            "state_not_needed",
+            model=model_key,
+            calib_seed=calib_seed,
+            variant=variant,
+            reason="all dependent evidence is complete",
+        )
         return path
     bank_path = state_path(model_key, calib_seed, "precision_bank")
     if not bank_path.exists():
@@ -880,7 +931,7 @@ def quantize_uniform(model_key: str, calib_seed: int, bits: int, force: bool) ->
     state = compose_precision_state(bank, lambda *_: action)
     save_torch_atomic(state, path)
     write_json(
-        path.with_suffix(".json"),
+        metadata_path,
         {
             "protocol_version": PROTOCOL_VERSION,
             "model_key": model_key,
@@ -955,6 +1006,14 @@ def evaluate_full(
     force: bool,
 ) -> None:
     require_protocol()
+    if not force and gsm8k_complete(model_key, variant, calib_seed):
+        status(
+            "full_evaluation_already_complete",
+            model=model_key,
+            variant=variant,
+            calib_seed=calib_seed,
+        )
+        return
     direct, method = configure_direct_eval(model_key, variant, calib_seed)
     direct.evaluate(
         model_key,
@@ -975,9 +1034,13 @@ def evaluate_allocation(
 ) -> None:
     if not (variant.startswith("random_") or variant.startswith("random_modules_")):
         raise ValueError("evaluate-allocation only accepts random_* or random_modules_* variants")
-    path = state_path(model_key, calib_seed, variant)
-    existed_before = path.exists()
-    materialize(model_key, calib_seed, variant, force=False)
+    completed = gsm8k_complete(model_key, variant, calib_seed)
+    if completed and not keep_state:
+        cleanup_state_artifact(model_key, calib_seed, variant)
+        return
+    materialize(model_key, calib_seed, variant, force=completed and keep_state)
+    if completed:
+        return
     evaluate_full(
         model_key,
         variant,
@@ -986,23 +1049,12 @@ def evaluate_allocation(
         max_new_tokens=256,
         force=False,
     )
-    direct, method = configure_direct_eval(model_key, variant, calib_seed)
-    sample = direct.sample_path(model_key, method, GSM8K_TEST_SIZE)
-    completed_ids = direct.done_doc_ids(sample)
-    if len(completed_ids) != GSM8K_TEST_SIZE:
+    if not gsm8k_complete(model_key, variant, calib_seed):
         raise RuntimeError(
-            f"Keeping allocation state because evaluation is incomplete: {len(completed_ids)}/{GSM8K_TEST_SIZE}"
+            f"Keeping allocation state because evaluation is incomplete: {model_key}/{variant}"
         )
-    if not keep_state and not existed_before:
-        path.unlink()
-        path.with_suffix(".json").unlink(missing_ok=True)
-        status(
-            "ephemeral_allocation_state_removed",
-            model=model_key,
-            calib_seed=calib_seed,
-            variant=variant,
-            reproducible_from=str(state_path(model_key, calib_seed, "precision_bank")),
-        )
+    if not keep_state:
+        cleanup_state_artifact(model_key, calib_seed, variant)
 
 
 def evaluate_broad(
@@ -1015,6 +1067,14 @@ def evaluate_broad(
     from ptq.eval import cleanup_gpu, run_eval_on_model
 
     require_protocol()
+    if not force and broad_complete(model_key, variant, calib_seed):
+        status(
+            "broad_evaluation_already_complete",
+            model=model_key,
+            variant=variant,
+            calib_seed=calib_seed,
+        )
+        return
     direct, method = configure_direct_eval(model_key, variant, calib_seed)
     model, tokenizer = direct.load_model(model_key, method)
     path = RESULTS_DIR / "broad" / f"{model_key}__{method}.json"
@@ -1066,6 +1126,14 @@ def evaluate_extra(
     from ptq.eval import cleanup_gpu
 
     require_protocol()
+    if not force and extra_complete(model_key, variant, calib_seed):
+        status(
+            "extra_evaluation_already_complete",
+            model=model_key,
+            variant=variant,
+            calib_seed=calib_seed,
+        )
+        return
     direct, method = configure_direct_eval(model_key, variant, calib_seed)
     model, tokenizer = direct.load_model(model_key, method)
     lm_model = HFLM(
@@ -1168,6 +1236,15 @@ def main() -> None:
     p.add_argument("--batch-size", type=int, default=DEFAULT_EVAL_BATCH_SIZE)
     p.add_argument("--keep-state", action="store_true")
 
+    p = sub.add_parser("cleanup-state")
+    p.add_argument("--model", required=True)
+    p.add_argument("--calib-seed", type=int, choices=CALIB_SEEDS, required=True)
+    p.add_argument("--variant", required=True)
+
+    p = sub.add_parser("cleanup-bank")
+    p.add_argument("--model", required=True)
+    p.add_argument("--calib-seed", type=int, choices=CALIB_SEEDS, required=True)
+
     for command in ["evaluate-full", "evaluate-broad", "evaluate-extra"]:
         p = sub.add_parser(command)
         p.add_argument("--model", required=True)
@@ -1231,6 +1308,10 @@ def main() -> None:
             args.batch_size,
             args.keep_state,
         )
+    elif args.command == "cleanup-state":
+        cleanup_state_artifact(model_key, args.calib_seed, args.variant)
+    elif args.command == "cleanup-bank":
+        cleanup_state_artifact(model_key, args.calib_seed, "precision_bank")
     elif args.command == "evaluate-full":
         evaluate_full(
             model_key,

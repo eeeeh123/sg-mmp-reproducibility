@@ -4,13 +4,25 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import random
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "experiments" / "revision_full" / "outputs"
-STATE_DIR = OUT / "states"
+
+
+def _configured_state_dir() -> Path:
+    value = os.environ.get("REVISION_FULL_STATE_DIR")
+    path = Path(value).expanduser() if value else OUT / "states"
+    if not path.is_absolute():
+        path = ROOT / path
+    return path.resolve()
+
+
+STATE_DIR = _configured_state_dir()
+STATE_METADATA_DIR = OUT / "state_metadata"
 SCREEN_DIR = OUT / "screens"
 RESULTS_DIR = OUT / "results"
 
@@ -297,6 +309,10 @@ def select_layers_under_budget(
 
 def state_path(model_key: str, calib_seed: int, variant: str) -> Path:
     return STATE_DIR / model_key / f"calib_{calib_seed}" / f"{variant}.pt"
+
+
+def state_metadata_path(model_key: str, calib_seed: int, variant: str) -> Path:
+    return STATE_METADATA_DIR / model_key / f"calib_{calib_seed}" / f"{variant}.json"
 
 
 def method_id(variant: str, calib_seed: int | None = None) -> str:

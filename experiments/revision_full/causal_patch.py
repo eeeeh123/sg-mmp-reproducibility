@@ -13,6 +13,7 @@ import numpy as np
 
 sys.path.insert(0, ".")
 
+from experiments.revision_full.lifecycle import causal_complete
 from experiments.revision_full.protocol import (
     CAUSAL_PATCH_N,
     GSM8K_TEST_SIZE,
@@ -104,7 +105,16 @@ def run(model_key: str, calib_seed: int, force: bool) -> None:
     path = result_path(model_key, calib_seed)
     if force and path.exists():
         path.unlink()
-    done = {int(row["doc_id"]) for row in read_jsonl(path)}
+    rows = read_jsonl(path)
+    done = {int(row["doc_id"]) for row in rows}
+    if not force and causal_complete(model_key, calib_seed):
+        print(f"[skip] complete causal patch: {path}", flush=True)
+        return
+    if not force and len(rows) == CAUSAL_PATCH_N and done == set(expected):
+        summarize(model_key, calib_seed)
+        if causal_complete(model_key, calib_seed):
+            print(f"[skip] completed causal summary without model reload: {path}", flush=True)
+            return
     state = state_path(model_key, calib_seed, "gptq_w4")
     if not state.exists():
         raise FileNotFoundError(f"Run gptq_w4 materialization first: {state}")
