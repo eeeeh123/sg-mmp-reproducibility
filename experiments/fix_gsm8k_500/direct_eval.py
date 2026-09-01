@@ -34,11 +34,12 @@ from statistics import mean
 sys.path.insert(0, ".")
 
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128")
 
 import torch
 import pyarrow.ipc as pa_ipc
-from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ptq.eval import cleanup_gpu
@@ -57,23 +58,20 @@ for p in [OUT, SAMPLE_DIR, LOG_DIR]:
 
 INDEX_SEED = 20260615
 DEFAULT_N = 500
+HF_DATASETS_ROOT = Path(
+    os.environ.get(
+        "HF_DATASETS_CACHE",
+        Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
+        / "datasets",
+    )
+)
 GSM8K_CACHE_ROOT = (
-    Path.home()
-    / ".cache"
-    / "huggingface"
-    / "datasets"
+    HF_DATASETS_ROOT
     / "openai___gsm8k"
     / "main"
     / "0.0.0"
     / "740312add88f781978c0658806c59bc2815b9866"
 )
-
-# The original Windows runs used a pre-populated Arrow cache because dataset
-# resolution was unreliable in that environment.  A release consumer should
-# instead be able to download the public benchmark on first use.  ``--offline``
-# keeps the historical cache-only behavior for an air-gapped rerun.
-OFFLINE_MODE = False
-DATASET_CACHE_DIR: Path | None = None
 
 MODEL_SPECS = {
     "qwen05": {
@@ -225,7 +223,7 @@ def find_arrow(split: str) -> Path:
     direct = GSM8K_CACHE_ROOT / f"gsm8k-{split}.arrow"
     if direct.exists():
         return direct
-    root = Path.home() / ".cache" / "huggingface" / "datasets" / "openai___gsm8k"
+    root = HF_DATASETS_ROOT / "openai___gsm8k"
     matches = sorted(root.rglob(f"gsm8k-{split}.arrow"), key=lambda p: p.stat().st_mtime, reverse=True)
     if matches:
         return matches[0]
@@ -245,41 +243,38 @@ def read_arrow_split(split: str) -> list[dict]:
 
 
 def get_dataset():
-    if OFFLINE_MODE:
-        # Avoid datasets.load_dataset() here.  The historical Windows runs used
-        # cached Arrow files, and this branch preserves that exact behavior.
-        return read_arrow_split("train"), read_arrow_split("test")
-
-    cache_dir = str(DATASET_CACHE_DIR) if DATASET_CACHE_DIR is not None else None
-    status("load_dataset_start", dataset="openai/gsm8k", cache_dir=cache_dir)
-    try:
-        train = load_dataset("openai/gsm8k", "main", split="train", cache_dir=cache_dir)
-        test = load_dataset("openai/gsm8k", "main", split="test", cache_dir=cache_dir)
-    except Exception as exc:
-        raise RuntimeError(
-            "Could not load public GSM8K. Check network access, or rerun with "
-            "--offline after populating the Hugging Face dataset cache."
-        ) from exc
-    status("load_dataset_done", train_rows=len(train), test_rows=len(test))
-    return train, test
+    # Avoid datasets.load_dataset() here. In this Windows/Codex environment it
+    # can stall while resolving the HF dataset builder even when the Arrow cache
+    # is already present. Reading the cached Arrow files is deterministic and
+    # keeps this validation fully offline.
+    return read_arrow_split("train"), read_arrow_split("test")
 
 
 def fixed_indices(n: int) -> list[int]:
+    if not 1 <= n <= 1319:
+        raise ValueError(f"GSM8K test size is 1319; got n={n}")
     path = OUT / f"gsm8k_{n}_indices.json"
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8"))["indices"]
-    rng = random.Random(INDEX_SEED)
-    indices = list(range(1319))
-    rng.shuffle(indices)
-    selected = sorted(indices[:n])
+    if n == 1319:
+        selected = list(range(1319))
+        seed = None
+        selection = "all official GSM8K test examples in dataset order"
+    else:
+        rng = random.Random(INDEX_SEED)
+        indices = list(range(1319))
+        rng.shuffle(indices)
+        selected = sorted(indices[:n])
+        seed = INDEX_SEED
+        selection = "sorted(shuffled(range(1319))[:n])"
     write_json(
         path,
         {
             "dataset": "openai/gsm8k",
             "split": "test",
             "n": n,
-            "seed": INDEX_SEED,
-            "selection": "sorted(shuffled(range(1319))[:n])",
+            "seed": seed,
+            "selection": selection,
             "indices": selected,
         },
     )
@@ -481,7 +476,15 @@ def evaluate(model_key: str, method: str, n: int, batch_size: int, max_new_token
         out_path.unlink()
     train, test = get_dataset()
     indices = fixed_indices(n)
-    done = done_doc_ids(out_path)
+    existing_rows = read_jsonl(out_path) if out_path.exists() else []
+    existing_by_id = {
+        int(row["doc_id"]): row
+        for row in existing_rows
+        if "doc_id" in row
+    }
+    done = set(existing_by_id)
+    running_correct = sum(int(row["correct"]) for row in existing_by_id.values())
+    running_total = len(existing_by_id)
     pending = [i for i in indices if i not in done]
     if not pending:
         print(f"[skip] {model_key}/{method}: {out_path} already has {len(done)} rows", flush=True)
@@ -499,21 +502,13 @@ def evaluate(model_key: str, method: str, n: int, batch_size: int, max_new_token
         f"[run] {model_key}/{method}: pending {len(pending)}/{n}, batch={batch_size}, max_new_tokens={max_new_tokens}",
         flush=True,
     )
+    report_every_batches = max(1, math.ceil(25 / batch_size))
 
     for start in range(0, len(pending), batch_size):
         batch_ids = pending[start : start + batch_size]
         prompts = build_model_prompts(model_key, tok, train, prefix, [test[i]["question"] for i in batch_ids])
-        status("batch_tokenize_start", model=model_key, method=method, offset=start, batch_ids=batch_ids)
         enc = tok(prompts, return_tensors="pt", padding=True, truncation=False).to(model.device)
         input_len = enc["input_ids"].shape[1]
-        status(
-            "batch_generate_start",
-            model=model_key,
-            method=method,
-            offset=start,
-            batch_ids=batch_ids,
-            input_tokens=input_len,
-        )
         outputs = model.generate(
             **enc,
             do_sample=False,
@@ -523,14 +518,22 @@ def evaluate(model_key: str, method: str, n: int, batch_size: int, max_new_token
         )
         if torch.cuda.is_available():
             torch.cuda.synchronize()
-        status("batch_generate_done", model=model_key, method=method, offset=start, batch_ids=batch_ids)
         gen_ids = outputs[:, input_len:]
         decoded = tok.batch_decode(gen_ids, skip_special_tokens=True)
         rows = []
-        for doc_id, gen_text in zip(batch_ids, decoded):
+        for doc_id, gen_text, token_row in zip(batch_ids, decoded, gen_ids):
             ex = test[doc_id]
             gold = gold_answer(ex["answer"])
             pred = extract_prediction(gen_text)
+            token_ids = token_row.tolist()
+            eos_positions = [
+                index for index, token_id in enumerate(token_ids)
+                if token_id == tok.eos_token_id
+            ]
+            ended_with_eos = bool(eos_positions)
+            generated_token_count = (
+                eos_positions[0] + 1 if ended_with_eos else len(token_ids)
+            )
             rows.append(
                 {
                     "doc_id": doc_id,
@@ -540,26 +543,36 @@ def evaluate(model_key: str, method: str, n: int, batch_size: int, max_new_token
                     "prediction": pred,
                     "correct": is_correct(pred, gold),
                     "generation": gen_text,
+                    "generated_token_count": generated_token_count,
+                    "ended_with_eos": ended_with_eos,
+                    "truncated": generated_token_count >= max_new_tokens and not ended_with_eos,
                 }
             )
         append_jsonl(out_path, rows)
 
-        done_now = len(done) + start + len(batch_ids)
-        acc_so_far = summarize_rows(read_jsonl(out_path))["accuracy"]
+        running_total += len(rows)
+        running_correct += sum(int(row["correct"]) for row in rows)
+        done_now = running_total
+        acc_so_far = round(100 * running_correct / running_total, 2)
         elapsed = time.time() - t0
-        print(f"[progress] {model_key}/{method}: {done_now}/{n}, acc={acc_so_far:.2f}, elapsed={elapsed:.0f}s", flush=True)
-        status(
-            "batch_written",
-            model=model_key,
-            method=method,
-            done=done_now,
-            total=n,
-            accuracy=acc_so_far,
-            sample_file=str(out_path),
-        )
+        batch_number = start // batch_size + 1
+        if batch_number % report_every_batches == 0 or done_now == n:
+            print(
+                f"[progress] {model_key}/{method}: {done_now}/{n}, "
+                f"acc={acc_so_far:.2f}, elapsed={elapsed:.0f}s",
+                flush=True,
+            )
+            status(
+                "batch_written",
+                model=model_key,
+                method=method,
+                done=done_now,
+                total=n,
+                accuracy=acc_so_far,
+                sample_file=str(out_path),
+            )
 
         del enc, outputs, gen_ids
-        torch.cuda.empty_cache()
 
     summarize_one(model_key, method, n)
     del model, tok
@@ -710,27 +723,8 @@ def main():
     parser.add_argument("--n", type=int, default=DEFAULT_N)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--max-new-tokens", type=int, default=256)
-    parser.add_argument(
-        "--offline",
-        action="store_true",
-        help="Use the historical local Arrow cache instead of downloading GSM8K.",
-    )
-    parser.add_argument(
-        "--dataset-cache-dir",
-        type=Path,
-        default=None,
-        help="Optional Hugging Face datasets cache directory for online loading.",
-    )
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
-
-    global OFFLINE_MODE, DATASET_CACHE_DIR
-    OFFLINE_MODE = args.offline
-    DATASET_CACHE_DIR = args.dataset_cache_dir
-    if OFFLINE_MODE:
-        os.environ["HF_DATASETS_OFFLINE"] = "1"
-        os.environ["TRANSFORMERS_OFFLINE"] = "1"
-    status("dataset_mode", offline=OFFLINE_MODE, cache_dir=str(DATASET_CACHE_DIR) if DATASET_CACHE_DIR else None)
 
     if args.cmd == "indices":
         indices = fixed_indices(args.n)

@@ -4,6 +4,11 @@ Version `1.2.0` of the code and derived results supporting *Reasoning
 Fragility in Quantized Small Language Models: Diagnosis and
 Sensitivity-Guided Mixed-Precision Repair*.
 
+The current `main` branch additionally includes the fail-closed
+`revision-full-v3` rejection-revision pipeline. Its new full-test GPU results
+are intentionally marked pending; the published v1.2 GSM8K-500 results below
+remain provenance and are not silently reused as v3 evidence.
+
 ## What this release can reproduce
 
 Two reproduction paths are deliberately separated:
@@ -63,6 +68,32 @@ The main quantization steps are GPU-intensive. The wrapper runs each model
 family in separate Python processes and writes intermediate states under the
 ignored local `results/` directory. Use `--dry-run` with any command to inspect
 the exact commands before running them.
+
+## Rejection-revision full experiment
+
+The resource-aware v3 protocol uses all 1,319 official GSM8K test items,
+native train-only sensitivity screens for every model, three calibration
+seeds, W4/W5/W6 and matched-placement controls, two 30-allocation null
+families for every primary model, selection/bootstrap uncertainty, explicit
+format and task controls, and fail-closed external-baseline gates.
+
+Model weights are not stored in GitHub or Git LFS. On the laboratory server,
+download and pin them directly from Hugging Face:
+
+```bash
+python experiments/revision_full/download_models.py --models qwen05 qwen15 smollm
+hf auth login  # required after accepting the Gemma license
+python experiments/revision_full/download_models.py --models gemma2
+python experiments/revision_full/download_core_datasets.py
+python experiments/revision_full/server_preflight.py
+python experiments/revision_full/make_server_plan.py > server_all.sh
+CUDA_VISIBLE_DEVICES=0 bash server_all.sh 2>&1 | tee server_all.log
+```
+
+The downloader records immutable upstream commit SHAs and resumes interrupted
+files. See `experiments/revision_full/SERVER_MIGRATION.md` for the complete
+single-RTX-3090 workflow and `experiments/revision_full/EXPERIMENT_PLAN.md`
+for the reviewer-facing evidence gates.
 
 ## Important provenance note
 

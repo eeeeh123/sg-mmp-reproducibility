@@ -1,6 +1,7 @@
 """校准数据加载工具"""
 
 import os
+import random
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 import torch
@@ -9,8 +10,16 @@ from transformers import AutoTokenizer
 from pathlib import Path
 
 
+def _datasets_cache_root() -> Path:
+    configured = os.environ.get("HF_DATASETS_CACHE")
+    if configured:
+        return Path(configured)
+    hf_home = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
+    return hf_home / "datasets"
+
+
 def _latest_arrow(pattern: str) -> Path | None:
-    root = Path.home() / ".cache" / "huggingface" / "datasets"
+    root = _datasets_cache_root()
     matches = sorted(root.rglob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
     return matches[0] if matches else None
 
@@ -38,6 +47,52 @@ def _load_gsm8k_train_questions() -> list[str] | None:
     return [r["question"] for r in rows if r.get("question")]
 
 
+def _packed_random_segments(
+    tokenizer: AutoTokenizer,
+    texts: list[str],
+    n_samples: int,
+    max_length: int,
+    seed: int,
+) -> torch.Tensor:
+    """Build exact-length calibration segments from a deterministic token pool.
+
+    The previous loader padded short, independent texts to ``max_length`` and
+    passed the padding through the model without an attention mask. Packing a
+    shared text stream avoids padded-token Hessian contamination while keeping
+    the requested sample count and sequence length explicit.
+    """
+    if n_samples <= 0 or max_length <= 0:
+        raise ValueError("n_samples and max_length must be positive")
+    token_pool: list[int] = []
+    target_pool_size = max(max_length + 1, 2 * n_samples * max_length)
+    separator = tokenizer.eos_token_id
+    for text in texts:
+        if not text or not text.strip():
+            continue
+        token_pool.extend(
+            tokenizer(text, add_special_tokens=False, return_attention_mask=False)[
+                "input_ids"
+            ]
+        )
+        if separator is not None:
+            token_pool.append(int(separator))
+        if len(token_pool) >= target_pool_size:
+            break
+    if len(token_pool) < max_length:
+        raise RuntimeError(
+            f"Calibration token pool has {len(token_pool)} tokens; need {max_length}"
+        )
+    rng = random.Random(seed)
+    max_start = len(token_pool) - max_length
+    starts = [rng.randint(0, max_start) for _ in range(n_samples)]
+    return torch.stack(
+        [
+            torch.tensor(token_pool[start : start + max_length], dtype=torch.long)
+            for start in starts
+        ]
+    )
+
+
 def get_calib_dataset(
     tokenizer: AutoTokenizer,
     n_samples: int = 128,
@@ -57,44 +112,18 @@ def get_calib_dataset(
         if texts is None:
             ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
             texts = list(ds["text"])
-        # 过滤空文本，取足够长的
-        texts = [t for t in texts if t and len(t.strip()) > 100]
-        import random
-        random.seed(seed)
-        random.shuffle(texts)
-        texts = texts[:n_samples]
+        texts = [t for t in texts if t and t.strip()]
     elif dataset_name == "gsm8k":
         questions = _load_gsm8k_train_questions()
         if questions is None:
             ds = load_dataset("gsm8k", "main", split="train")
             questions = [ds[int(i)]["question"] for i in range(len(ds))]
-        import random
-        random.seed(seed)
-        indices = list(range(len(questions)))
-        random.shuffle(indices)
-        texts = [questions[int(i)] for i in indices[:n_samples]]
+        texts = questions
     else:
         ds = load_dataset(dataset_name, "en", split="validation", streaming=True)
-        ds = ds.shuffle(seed=seed).take(n_samples)
+        ds = ds.shuffle(seed=seed).take(max(n_samples * 4, n_samples))
         texts = [item["text"] for item in ds]
-
-    samples = []
-    for text in texts:
-        tokens = tokenizer(
-            text,
-            truncation=True,
-            max_length=max_length,
-            return_tensors="pt",
-        )
-        tok_ids = tokens.input_ids[0]
-        # pad 到 max_length
-        if tok_ids.shape[0] < max_length:
-            tok_ids = torch.cat(
-                [tok_ids, torch.zeros(max_length - tok_ids.shape[0], dtype=torch.long)]
-            )
-        samples.append(tok_ids)
-
-    return torch.stack(samples)
+    return _packed_random_segments(tokenizer, texts, n_samples, max_length, seed)
 
 
 def get_wikitext2(tokenizer: AutoTokenizer, max_length: int = 2048) -> torch.Tensor:

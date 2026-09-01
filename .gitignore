@@ -2,6 +2,12 @@
 /models/
 /results/
 /figures/
+/experiments/revision_full/outputs/
+/server_plans/
+server_all.sh
+server_all.log
+*.tar
+*.tar.gz
 /*.zip
 *.pt
 *.pth

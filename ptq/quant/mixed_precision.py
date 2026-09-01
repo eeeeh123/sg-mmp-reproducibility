@@ -13,7 +13,12 @@ import torch.nn as nn
 from typing import Callable, Dict, Optional
 from transformers import AutoModelForCausalLM
 
-from ptq.quant.gptq import gptq_quantize_linear
+from ptq.quant.gptq import (
+    collect_linear_inputs,
+    dequantize_gptq,
+    gptq_quantize_linear,
+    gptq_quantize_linear_multi,
+)
 
 ATTN_PROJ = {"q_proj", "k_proj", "v_proj"}
 FFN_PROJ = {"o_proj", "gate_proj", "up_proj", "down_proj"}
@@ -45,19 +50,6 @@ def _quantize_w8_perchannel(weight: torch.Tensor) -> Dict:
     return {"w_q": w_q, "q_scale": q_scale, "method": "w8_perchannel"}
 
 
-def _collect_tokens(layer_inputs: list, max_tokens: int = 2048) -> torch.Tensor:
-    """从逐样本输入列表中收集最多 max_tokens 个 token，返回 (total_tokens, in_features)。"""
-    chunks = []
-    total = 0
-    for t in layer_inputs:
-        flat = t.view(-1, t.shape[-1])
-        chunks.append(flat)
-        total += flat.shape[0]
-        if total >= max_tokens:
-            break
-    return torch.cat(chunks, dim=0)[:max_tokens]
-
-
 @torch.no_grad()
 def quantize_model_mixed_precision(
     model: AutoModelForCausalLM,
@@ -77,75 +69,149 @@ def quantize_model_mixed_precision(
 
     device = next(model.parameters()).device
     model.eval()
-    n_samples = calib_data.shape[0]
-
-    linear_layers = [(name, module) for name, module in model.named_modules()
-                     if isinstance(module, nn.Linear) and "lm_head" not in name]
-
-    BATCH_LAYERS = 8
-    MAX_CALIB_TOKENS = 4096
+    linear_layers, layer_inputs = collect_linear_inputs(
+        model, calib_data, max_tokens=4096
+    )
     quant_state = {}
-
-    for batch_start in range(0, len(linear_layers), BATCH_LAYERS):
-        batch_end = min(batch_start + BATCH_LAYERS, len(linear_layers))
-        current_batch = linear_layers[batch_start:batch_end]
-        batch_names = {name for name, _ in current_batch}
-        batch_inputs = {name: [] for name in batch_names}
-        batch_token_counts = {name: 0 for name in batch_names}
-
-        def make_hook(layer_name):
-            def hook(module, args, output):
-                if batch_token_counts[layer_name] >= MAX_CALIB_TOKENS:
-                    return
-                x = args[0].detach().cpu()
-                batch_inputs[layer_name].append(x)
-                batch_token_counts[layer_name] += x.shape[0] * x.shape[1]
-            return hook
-
-        hooks = []
-        for layer_name, layer_module in linear_layers:
-            if layer_name in batch_names:
-                hooks.append(layer_module.register_forward_hook(make_hook(layer_name)))
-
+    for layer_idx, (layer_name, layer_module) in enumerate(linear_layers):
+        layer_short = layer_name.split(".")[-1]
+        action = layer_policy(layer_idx, layer_name, layer_short)
+        if action == "w4":
+            print(f"  GPTQ-W4 layer {layer_idx+1}/{len(linear_layers)}: {layer_name}", flush=True)
+            inp_gpu = layer_inputs[layer_name].to(device=device, dtype=torch.float32)
+            qi = gptq_quantize_linear(
+                layer_module, inp_gpu, bits=bits_w4, group_size=group_size
+            )
+            quant_state[layer_name] = {
+                key: value.cpu() if hasattr(value, "cpu") else value
+                for key, value in qi.items()
+            }
+            del inp_gpu, qi
+        elif action == "w8":
+            print(f"  INT8    layer {layer_idx+1}/{len(linear_layers)}: {layer_name}", flush=True)
+            qi = _quantize_w8_perchannel(layer_module.weight)
+            qi.update(
+                {
+                    "bits": 8,
+                    "in_features": layer_module.in_features,
+                    "out_features": layer_module.out_features,
+                }
+            )
+            quant_state[layer_name] = {
+                key: value.cpu() if hasattr(value, "cpu") else value
+                for key, value in qi.items()
+            }
+            del qi
+        else:
+            print(f"  SKIP    layer {layer_idx+1}/{len(linear_layers)}: {layer_name}", flush=True)
+        del layer_inputs[layer_name]
+        gc.collect()
         torch.cuda.empty_cache()
-        for i in range(0, n_samples):
-            batch = calib_data[i:i+1].to(device)
-            model.model(batch)
-            del batch
-            torch.cuda.empty_cache()
-
-        for h in hooks:
-            h.remove()
-
-        for layer_idx, (layer_name, layer_module) in enumerate(current_batch):
-            global_idx = batch_start + layer_idx
-            layer_short = layer_name.split(".")[-1]
-            action = layer_policy(global_idx, layer_name, layer_short)
-
-            if action == "w4":
-                print(f"  GPTQ-W4 layer {global_idx+1}/{len(linear_layers)}: {layer_name}", flush=True)
-                layer_inputs = batch_inputs[layer_name]
-                inp_gpu = _collect_tokens(layer_inputs, max_tokens=2048).float().to(device)
-                qi = gptq_quantize_linear(layer_module, inp_gpu, bits=bits_w4, group_size=group_size)
-                qi["method"] = "gptq_w4"
-                quant_state[layer_name] = {k: v.cpu() if hasattr(v, 'cpu') else v for k, v in qi.items()}
-                del inp_gpu, qi
-
-            elif action == "w8":
-                print(f"  INT8    layer {global_idx+1}/{len(linear_layers)}: {layer_name}", flush=True)
-                qi = _quantize_w8_perchannel(layer_module.weight)
-                quant_state[layer_name] = {k: v.cpu() if hasattr(v, 'cpu') else v for k, v in qi.items()}
-                del qi
-
-            else:
-                print(f"  SKIP    layer {global_idx+1}/{len(linear_layers)}: {layer_name}", flush=True)
-
-            if layer_name in batch_inputs:
-                del batch_inputs[layer_name]
-            gc.collect()
-            torch.cuda.empty_cache()
 
     return quant_state
+
+
+@torch.no_grad()
+def quantize_model_precision_bank(
+    model: AutoModelForCausalLM,
+    calib_data: torch.Tensor,
+    bits_w4: int = 4,
+    group_size: int = 128,
+    uniform_bits: tuple[int, ...] = (5, 6),
+    max_calib_tokens: int = 4096,
+) -> Dict[str, Dict[str, Dict]]:
+    """Build reusable W4/W5/W6/W8 states from one activation capture.
+
+    The returned bank lets allocation experiments reuse identical per-module
+    quantization results. This removes calibration and quantizer variation from
+    comparisons between SG-MMP, random allocations, and module controls.
+    """
+    import gc
+
+    device = next(model.parameters()).device
+    model.eval()
+    linear_layers, layer_inputs = collect_linear_inputs(
+        model, calib_data, max_tokens=max_calib_tokens
+    )
+    bank: Dict[str, Dict[str, Dict]] = {}
+    all_gptq_bits = (bits_w4, *uniform_bits)
+    for ordinal, (layer_name, layer_module) in enumerate(linear_layers, start=1):
+        print(f"  BANK layer {ordinal}/{len(linear_layers)}: {layer_name}", flush=True)
+        inp_gpu = layer_inputs.pop(layer_name).to(device=device, dtype=torch.float32)
+        quantized = gptq_quantize_linear_multi(
+            layer_module,
+            inp_gpu,
+            bits_values=all_gptq_bits,
+            group_size=group_size,
+        )
+        w4 = quantized[bits_w4]
+        w4_dequantized = dequantize_gptq(
+            w4["w_q"], w4["scale"], w4["zero"], group_size
+        ).float()
+        original = layer_module.weight.detach().float()
+        input_second_moment = inp_gpu.square().mean(dim=0).unsqueeze(0)
+        signal = (original.square() * input_second_moment).mean().clamp(min=1e-12)
+        noise = ((original - w4_dequantized).square() * input_second_moment).mean()
+        hessian_diag_nmse = float((noise / signal).item())
+        w8 = _quantize_w8_perchannel(layer_module.weight)
+        w8.update(
+            {
+                "bits": 8,
+                "in_features": layer_module.in_features,
+                "out_features": layer_module.out_features,
+            }
+        )
+        choices = {
+            f"w{bits}": {
+                key: value.cpu() if hasattr(value, "cpu") else value
+                for key, value in info.items()
+            }
+            for bits, info in quantized.items()
+        }
+        choices["w8"] = {
+            key: value.cpu() if hasattr(value, "cpu") else value
+            for key, value in w8.items()
+        }
+        choices["scores"] = {
+            "hessian_diag_reconstruction_nmse": hessian_diag_nmse,
+        }
+        bank[layer_name] = choices
+        del (
+            inp_gpu,
+            input_second_moment,
+            noise,
+            original,
+            signal,
+            quantized,
+            w4,
+            w4_dequantized,
+            w8,
+        )
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    return bank
+
+
+def compose_precision_state(
+    bank: Dict[str, Dict[str, Dict]],
+    layer_policy: Callable[[int, str, str], str],
+) -> Dict[str, Dict]:
+    """Materialize one precision allocation from a reusable bank."""
+    state: Dict[str, Dict] = {}
+    for module_idx, (name, choices) in enumerate(bank.items()):
+        action = layer_policy(module_idx, name, name.split(".")[-1])
+        if action == "skip":
+            continue
+        if action not in choices:
+            available = sorted(key for key in choices if key != "scores")
+            raise KeyError(
+                f"Precision bank has no {action} entry for {name}; available={available}"
+            )
+        # Application functions pop top-level entries. A shallow copy keeps the
+        # reusable bank intact while avoiding duplicate tensor storage in RAM.
+        state[name] = dict(choices[action])
+    return state
 
 
 @torch.no_grad()

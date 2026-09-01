@@ -26,12 +26,14 @@ TASK_FEWSHOT = {
     "gsm8k": 5,
 }
 
-# GSM8K 采样 300（±2.9%），其余全量
+# Headline benchmark policy: every task, including all 1,319 GSM8K test
+# examples, is evaluated in full. Development/sensitivity screening must use
+# GSM8K train data and is implemented separately under experiments/revision_full.
 TASK_LIMIT = {
     "arc_challenge": None,
     "hellaswag": None,
     "mmlu": None,
-    "gsm8k": 300,
+    "gsm8k": None,
 }
 
 # 校准数据配置

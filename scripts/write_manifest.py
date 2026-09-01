@@ -21,11 +21,34 @@ def is_released_file(path: Path, root: Path, output: Path) -> bool:
     parts = path.relative_to(root).parts
     if not parts:
         return False
-    if parts[0] in {".git", "models", "results", "figures", ".venv", ".pytest_cache", ".release-audit"}:
+    if parts[0] in {
+        ".git",
+        "models",
+        "results",
+        "figures",
+        "server_plans",
+        ".venv",
+        ".pytest_cache",
+        ".release-audit",
+    }:
         return False
-    if any(part in {"__pycache__", "samples", "logs", "cache"} for part in parts):
+    if any(
+        part in {"__pycache__", "samples", "logs", "cache", "outputs"}
+        for part in parts
+    ):
         return False
-    return path.suffix.lower() not in {".pt", ".pth", ".pyc", ".safetensors", ".tmp", ".zip"}
+    if path.name in {"server_all.sh", "server_all.log"}:
+        return False
+    return path.suffix.lower() not in {
+        ".pt",
+        ".pth",
+        ".pyc",
+        ".safetensors",
+        ".tmp",
+        ".zip",
+        ".tar",
+        ".gz",
+    }
 
 
 def main() -> None:
@@ -41,7 +64,10 @@ def main() -> None:
         if is_released_file(path, root, output)
     )
     lines = [f"{digest(path)}  {path.relative_to(root).as_posix()}" for path in paths]
-    output.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Checksum manifests are consumed across Linux and Windows. Write bytes so
+    # Windows newline translation cannot make Git report every changed row as
+    # trailing whitespace or alter the release archive across platforms.
+    output.write_bytes(("\n".join(lines) + "\n").encode("utf-8"))
     print(f"Wrote {len(lines)} checksums to {output}")
 
 

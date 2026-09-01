@@ -24,10 +24,173 @@ def _hessian_from_calib(
     inp: (total_tokens, in_features)
     返回: H (in_features, in_features)
     """
-    H = inp.t().matmul(inp)  # (in_features, in_features)
+    H = inp.t().matmul(inp)  # (in_features, in_features), on inp.device
     # 添加 damping 保证正定性
-    H.diagonal().add_(0.01 * H.diagonal().mean())
+    damping = 0.01 * H.diagonal().mean().abs().clamp(min=1e-6)
+    H.diagonal().add_(damping)
     return H
+
+
+@torch.no_grad()
+def collect_linear_inputs(
+    model: AutoModelForCausalLM,
+    calib_data: torch.Tensor,
+    max_tokens: int = 4096,
+) -> tuple[list[tuple[str, nn.Linear]], Dict[str, torch.Tensor]]:
+    """Collect a deterministic, sample-balanced activation reservoir once.
+
+    Every calibration sequence contributes either ``floor`` or ``ceil`` of the
+    fixed token budget. Hooks cover all eligible linear modules in one model
+    pass, avoiding the previous full-model replay for every eight modules.
+    """
+    if calib_data.ndim != 2 or calib_data.shape[0] <= 0:
+        raise ValueError("calib_data must have shape (samples, sequence_length)")
+    n_samples = int(calib_data.shape[0])
+    if max_tokens < n_samples:
+        raise ValueError("max_tokens must be at least the calibration sample count")
+    device = next(model.parameters()).device
+    model.eval()
+    linear_layers = [
+        (name, module)
+        for name, module in model.named_modules()
+        if isinstance(module, nn.Linear) and "lm_head" not in name
+    ]
+    collected: Dict[str, list[torch.Tensor]] = {name: [] for name, _ in linear_layers}
+    current_quota = {"tokens": 0}
+
+    def make_hook(layer_name: str):
+        def hook(module, args, output):
+            quota = current_quota["tokens"]
+            if quota <= 0:
+                return
+            flat = args[0].detach().reshape(-1, args[0].shape[-1])
+            if quota >= flat.shape[0]:
+                chosen = flat
+            else:
+                positions = torch.linspace(
+                    0, flat.shape[0] - 1, quota, device=flat.device
+                ).round().long()
+                chosen = flat.index_select(0, positions)
+            collected[layer_name].append(chosen.to("cpu"))
+
+        return hook
+
+    hooks = [module.register_forward_hook(make_hook(name)) for name, module in linear_layers]
+    base_quota, remainder = divmod(max_tokens, n_samples)
+    try:
+        for index in range(n_samples):
+            current_quota["tokens"] = base_quota + int(index < remainder)
+            batch = calib_data[index : index + 1].to(device)
+            model.model(input_ids=batch, use_cache=False)
+            del batch
+            if (index + 1) % 16 == 0 or index + 1 == n_samples:
+                print(f"  calibration capture {index + 1}/{n_samples}", flush=True)
+    finally:
+        for hook in hooks:
+            hook.remove()
+
+    merged: Dict[str, torch.Tensor] = {}
+    for name, _ in linear_layers:
+        if not collected[name]:
+            raise RuntimeError(f"No calibration activations captured for {name}")
+        merged[name] = torch.cat(collected[name], dim=0)[:max_tokens]
+        if merged[name].shape[0] != max_tokens:
+            raise RuntimeError(
+                f"Captured {merged[name].shape[0]}/{max_tokens} tokens for {name}"
+            )
+    return linear_layers, merged
+
+
+@torch.no_grad()
+def gptq_quantize_linear_multi(
+    layer: nn.Linear,
+    inp: torch.Tensor,
+    bits_values: tuple[int, ...] = (4,),
+    group_size: int = 128,
+) -> Dict[int, Dict]:
+    """Quantize one linear layer at multiple bits with one Hessian inverse.
+
+    Args:
+        layer: nn.Linear 层
+        inp: 该层的输入激活, shape (total_tokens, in_features)
+        bits_values: one or more quantization bit widths from 2 through 7
+        group_size: 分组大小
+    """
+    bits_values = tuple(dict.fromkeys(int(bits) for bits in bits_values))
+    if not bits_values or any(bits < 2 or bits > 7 for bits in bits_values):
+        raise ValueError("GPTQ code tensors support bit widths from 2 through 7")
+    original = layer.weight.data.detach().float()
+    out_feat, in_feat = original.shape
+    dev = original.device
+
+    # On a 24-GiB server GPU, keeping this matrix on-device avoids making the
+    # Cholesky decomposition the dominant CPU bottleneck. Only one module's
+    # Hessian is live at a time.
+    H = _hessian_from_calib(layer, inp.float().to(dev))
+    try:
+        L = torch.linalg.cholesky(H)
+    except RuntimeError:
+        H.diagonal().add_(0.1 * H.diagonal().mean().abs().clamp(min=1e-6))
+        L = torch.linalg.cholesky(H)
+    H_inv = torch.cholesky_inverse(L)
+    del H, L
+    results: Dict[int, Dict] = {}
+    for bits in bits_values:
+        W = original.clone()
+        Q = torch.empty((out_feat, in_feat), device=dev, dtype=torch.int8)
+        qmin, qmax = 0, 2**bits - 1
+        n_groups = (in_feat + group_size - 1) // group_size
+        scales = torch.zeros(out_feat, n_groups, device=dev)
+        zeros = torch.zeros(out_feat, n_groups, device=dev)
+        # A group-aligned block update is algebraically equivalent to the
+        # column-wise update, but applies cross-block corrections with GEMM.
+        # This removes thousands of wide rank-one kernel launches per module.
+        for block_start in range(0, in_feat, group_size):
+            block_end = min(block_start + group_size, in_feat)
+            block_width = block_end - block_start
+            W_block = W[:, block_start:block_end].clone()
+            H_block = H_inv[block_start:block_end, block_start:block_end]
+            normalized_errors = torch.zeros_like(W_block)
+            group_idx = block_start // group_size
+            weight_min = W_block.amin(dim=-1, keepdim=True)
+            weight_max = W_block.amax(dim=-1, keepdim=True)
+            scale = (weight_max - weight_min).clamp(min=1e-8) / (qmax - qmin)
+            zero = (qmin - weight_min / scale).clamp(qmin, qmax).round()
+            scales[:, group_idx] = scale.squeeze(-1)
+            zeros[:, group_idx] = zero.squeeze(-1)
+
+            for local_index in range(block_width):
+                weight_column = W_block[:, local_index : local_index + 1]
+                quantized_column = (
+                    weight_column / scale + zero
+                ).round().clamp(qmin, qmax)
+                dequantized_column = (quantized_column - zero) * scale
+                Q[:, block_start + local_index : block_start + local_index + 1] = quantized_column
+                diagonal = H_block[local_index, local_index].clamp(min=1e-12)
+                normalized_error = (weight_column - dequantized_column) / diagonal
+                normalized_errors[:, local_index : local_index + 1] = normalized_error
+                if local_index + 1 < block_width:
+                    W_block[:, local_index + 1 :] -= normalized_error * H_block[
+                        local_index, local_index + 1 :
+                    ].unsqueeze(0)
+
+            if block_end < in_feat:
+                W[:, block_end:] -= normalized_errors.matmul(
+                    H_inv[block_start:block_end, block_end:]
+                )
+            del W_block, H_block, normalized_errors
+
+        results[bits] = {
+            "w_q": Q,
+            "scale": scales,
+            "zero": zeros,
+            "bits": bits,
+            "method": f"gptq_w{bits}",
+            "group_size": group_size,
+            "in_features": in_feat,
+            "out_features": out_feat,
+        }
+    return results
 
 
 @torch.no_grad()
@@ -37,88 +200,7 @@ def gptq_quantize_linear(
     bits: int = 4,
     group_size: int = 128,
 ) -> Dict:
-    """对单个 Linear 层做 GPTQ 量化。
-
-    Args:
-        layer: nn.Linear 层
-        inp: 该层的输入激活, shape (total_tokens, in_features)
-        bits: 量化位宽
-        group_size: 分组大小
-
-    Returns:
-        quant_info: {w_q, scale, zero, group_size}
-    """
-    W = layer.weight.data.clone().float()  # (out_features, in_features)
-    out_feat, in_feat = W.shape
-    dev = W.device
-
-    H = _hessian_from_calib(layer, inp.float().cpu()).cpu()
-    try:
-        L = torch.linalg.cholesky(H)
-    except RuntimeError:
-        H.diagonal().add_(0.1 * H.diagonal().mean())
-        L = torch.linalg.cholesky(H)
-    H_inv = torch.cholesky_inverse(L).to(dev)
-
-    Q = torch.zeros_like(W)
-    qmin, qmax = 0, 2**bits - 1
-
-    # 保存 scale / zero
-    n_groups = (in_feat + group_size - 1) // group_size
-    scales = torch.zeros(out_feat, n_groups, device=dev)
-    zeros = torch.zeros(out_feat, n_groups, device=dev)
-
-    # 逐列量化（in_features 方向）
-    dead = torch.zeros(in_feat, dtype=torch.bool, device=dev)
-
-    for i in range(in_feat):
-        if i % group_size == 0:
-            group_idx = i // group_size
-            g_end = min(i + group_size, in_feat)
-            # 计算当前 group 的 scale / zero
-            w_group = W[:, i:g_end]
-            w_min = w_group.amin(dim=-1, keepdim=True)
-            w_max = w_group.amax(dim=-1, keepdim=True)
-            scale = (w_max - w_min).clamp(min=1e-8) / (qmax - qmin)
-            zero = qmin - w_min / scale
-            zero = zero.clamp(qmin, qmax).round()
-            scales[:, group_idx] = scale.squeeze(-1)
-            zeros[:, group_idx] = zero.squeeze(-1)
-
-        # 量化第 i 列
-        group_idx = i // group_size
-        scale_i = scales[:, group_idx : group_idx + 1]  # (out, 1)
-        zero_i = zeros[:, group_idx : group_idx + 1]  # (out, 1)
-
-        w_col = W[:, i : i + 1]  # (out, 1)
-        q_col = (w_col / scale_i + zero_i).round().clamp(qmin, qmax)
-        dq_col = (q_col - zero_i) * scale_i  # 去量化值
-
-        Q[:, i : i + 1] = q_col
-
-        # 量化误差
-        err = w_col - dq_col  # (out, 1)
-
-        # 用 H_inv 补偿剩余的列
-        # 剩余列 j > i: W[:, j] -= err * H_inv[i, j] / H_inv[i, i]
-        if i < in_feat - 1:
-            remaining = torch.arange(i + 1, in_feat, device=dev)
-            H_inv_row = H_inv[i, remaining]  # (remaining_len,)
-            H_inv_ii = H_inv[i, i]
-            correction = err @ (H_inv_row.unsqueeze(0) / H_inv_ii)  # (out, remaining_len)
-            W[:, remaining] -= correction
-
-    # GPTQ codes are in [0, 2**bits - 1]. int8 is enough for 4-bit and avoids
-    # oversized state files that can crash PyTorch/CUDA on Windows when loaded.
-    w_q = Q.to(torch.int8)
-    return {
-        "w_q": w_q,
-        "scale": scales,
-        "zero": zeros,
-        "group_size": group_size,
-        "in_features": in_feat,
-        "out_features": out_feat,
-    }
+    return gptq_quantize_linear_multi(layer, inp, (bits,), group_size)[bits]
 
 
 def dequantize_gptq(w_q: torch.Tensor, scale: torch.Tensor, zero: torch.Tensor, group_size: int) -> torch.Tensor:
@@ -167,62 +249,23 @@ def quantize_model_gptq(
     import gc
     device = next(model.parameters()).device
     model.eval()
-    n_samples = calib_data.shape[0]
-
-    linear_layers = [(name, module) for name, module in model.named_modules()
-                     if isinstance(module, nn.Linear) and "lm_head" not in name]
-
-    BATCH_LAYERS = 8
-    MAX_CALIB_TOKENS = 4096
-
+    linear_layers, layer_inputs = collect_linear_inputs(
+        model, calib_data, max_tokens=4096
+    )
     quant_state = {}
-
-    for batch_start in range(0, len(linear_layers), BATCH_LAYERS):
-        batch_end = min(batch_start + BATCH_LAYERS, len(linear_layers))
-        current_batch_layers = linear_layers[batch_start:batch_end]
-        batch_names = {name for name, _ in current_batch_layers}
-
-        batch_inputs = {name: [] for name in batch_names}
-        batch_token_counts = {name: 0 for name in batch_names}
-
-        def make_hook(layer_name):
-            def hook(module, args, output):
-                if batch_token_counts[layer_name] >= MAX_CALIB_TOKENS:
-                    return
-                x = args[0].detach().cpu()
-                batch_inputs[layer_name].append(x)
-                batch_token_counts[layer_name] += x.shape[0] * x.shape[1]
-            return hook
-
-        hooks = []
-        for layer_name, layer_module in linear_layers:
-            if layer_name in batch_names:
-                hooks.append(layer_module.register_forward_hook(make_hook(layer_name)))
-
+    for layer_idx, (layer_name, layer_module) in enumerate(linear_layers):
+        inp_gpu = layer_inputs.pop(layer_name).to(device=device, dtype=torch.float32)
+        print(f"  GPTQ layer {layer_idx+1}/{len(linear_layers)}: {layer_name}", flush=True)
+        qi = gptq_quantize_linear(
+            layer_module, inp_gpu, bits=bits, group_size=group_size
+        )
+        quant_state[layer_name] = {
+            key: value.cpu() if hasattr(value, "cpu") else value
+            for key, value in qi.items()
+        }
+        del inp_gpu, qi
+        gc.collect()
         torch.cuda.empty_cache()
-        for i in range(0, n_samples):
-            batch = calib_data[i:i+1].to(device)
-            model.model(batch)
-            del batch
-            torch.cuda.empty_cache()
-
-        for h in hooks:
-            h.remove()
-
-        for layer_idx, (layer_name, layer_module) in enumerate(current_batch_layers):
-            global_idx = batch_start + layer_idx
-            layer_inputs = batch_inputs[layer_name]
-            inp = torch.cat(layer_inputs, dim=0).view(-1, layer_inputs[0].shape[-1])
-            inp_gpu = inp[:2048].float().to(device)
-
-            print(f"  GPTQ layer {global_idx+1}/{len(linear_layers)}: {layer_name}", flush=True)
-
-            qi = gptq_quantize_linear(layer_module, inp_gpu, bits=bits, group_size=group_size)
-            quant_state[layer_name] = {k: v.cpu() if hasattr(v, 'cpu') else v for k, v in qi.items()}
-
-            del inp, inp_gpu, qi, batch_inputs[layer_name]
-            gc.collect()
-            torch.cuda.empty_cache()
 
     return quant_state
 

@@ -1,0 +1,9 @@
+{
+  "protocol_version": "revision-full-v3",
+  "canonical_gsm8k_evaluator": "evaluate-full",
+  "broad_table_includes_gsm8k": false,
+  "mechanistic_claim": "enabled_only_if_causal_patch_gate_passes",
+  "deployment_efficiency_claim": "disabled_until_packed_kernel_measurements_exist",
+  "external_baseline_claim": "enabled_only_if_official_tacq_and_hawq_v2_results_are_registered",
+  "legacy_300_500_headline_claims": "forbidden"
+}

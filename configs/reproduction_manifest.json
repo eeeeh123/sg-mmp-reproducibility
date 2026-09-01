@@ -68,5 +68,17 @@
     "qwen15": [2, 7, 8, 13],
     "smollm": [2, 6, 7, 11]
   },
-  "selection_note": "The original Qwen2.5-0.5B sensitivity screen used the first 300 GSM8K test documents. The release includes a 381-example non-overlap robustness analysis; it must be reported alongside, rather than treating the full 500-example direct result as completely selection-independent."
+  "selection_note": "The original Qwen2.5-0.5B sensitivity screen used the first 300 GSM8K test documents. The release includes a 381-example non-overlap robustness analysis; it must be reported alongside, rather than treating the full 500-example direct result as completely selection-independent.",
+  "revision_full_v3": {
+    "status": "code-verified; GPU results pending",
+    "canonical_test": "all 1319 official GSM8K test items",
+    "selection": "three disjoint 256-item GSM8K-train screens per model",
+    "calibration_seeds": [41, 97, 193],
+    "random_allocations_per_primary_model": {
+      "layer": 30,
+      "module": 30
+    },
+    "model_provenance": "experiments/revision_full/outputs/model_snapshot_manifest.json is generated before experiments and records immutable Hugging Face commit SHAs",
+    "protocol": "experiments/revision_full/EXPERIMENT_PLAN.md"
+  }
 }
