@@ -1,4 +1,4 @@
-# Rejection-revision resource-aware full experiment pipeline (v3)
+# Rejection-revision resource-aware full experiment pipeline (v4)
 
 This pipeline is the only source for revised headline results. Historical GSM8K-300/500 scripts and outputs are preserved for provenance, but `claim_policy.json` forbids using them as revised-paper evidence.
 
@@ -16,18 +16,18 @@ This pipeline is the only source for revised headline results. Historical GSM8K-
 - A fixed 200-example teacher-forced activation-patching diagnostic is implemented for Qwen2.5-0.5B.
 - Deployment speed/memory claims are disabled until a real packed-kernel backend is measured.
 
-## Local preflight
+## Server preflight
 
-Run from the repository root before copying the project to the server:
+After downloading and fingerprinting every model and dataset on the server, run:
 
 ```bash
-python -m unittest experiments.revision_full.test_protocol
+python -m unittest discover -s experiments/revision_full -p "test*.py" -v
 python experiments/revision_full/run.py prepare --force
 python experiments/revision_full/format_control.py --prepare-only --force
-python experiments/revision_full/readiness.py --stage preflight
+python experiments/revision_full/server_preflight.py --expected-gpus 2 --concurrent-models 2
 ```
 
-`preflight` fails closed if the protocol version, three seeds, full test set, fixed format manifest, or existing state metadata disagree.
+Preflight also verifies immutable checkpoint/cache hashes, both GPUs, offline mode, RAM, disk, and the batch/token lock. Run the four train-only smoke tests in `SERVER_MIGRATION.md` before creating the protocol lock.
 
 ## Server run order
 
@@ -45,9 +45,10 @@ The core loop is lifecycle-aware. It materializes, consumes, verifies, and
 cleans one state before creating the next:
 
 ```bash
+python experiments/revision_full/run.py build-screen-bank --model qwen05 --split-id 0 --calib-seed 41
 python experiments/revision_full/run.py screen --model qwen05 --split-id 0
-python experiments/revision_full/run.py screen --model qwen05 --split-id 1
-python experiments/revision_full/run.py screen --model qwen05 --split-id 2
+python experiments/revision_full/run.py cleanup-screen-bank --model qwen05 --split-id 0 --calib-seed 41
+# Repeat build/screen/cleanup for split 1/seed 97 and split 2/seed 193.
 python experiments/revision_full/run.py select --model qwen05
 python experiments/revision_full/run.py build-bank --model qwen05 --calib-seed 97
 python experiments/revision_full/run.py quantize-uniform --model qwen05 --calib-seed 97 --bits 5
@@ -74,7 +75,7 @@ After W4 and SG-MMP seed-41 generations exist for a primary model:
 python experiments/revision_full/error_analysis.py prepare --model qwen05 --calib-seed 41 --sample-size 200
 ```
 
-Complete `rater1_label`, `rater2_label` for at least 40 rows, and `consensus_label` for all 200 rows. Then run:
+Give output A and output B separate labels. Complete both consensus output fields for all 200 rows; for the 40 rows marked `double_code_required=1`, both raters must label both outputs. Then run:
 
 ```bash
 python experiments/revision_full/error_analysis.py summarize --annotations <annotation.csv>
@@ -104,8 +105,8 @@ python experiments/revision_full/readiness.py --stage resubmission
 
 ## Result replacement policy
 
-Do not overwrite old 300/500 files. New results live only under `experiments/revision_full/outputs/` and replace old numerical claims in the revised manuscript. Old results may remain as exploratory provenance, but cannot be pooled with, averaged into, or used to repair missing v3 runs.
+Do not overwrite old 300/500 files. New results live only under `experiments/revision_full/outputs/` and replace old numerical claims in the revised manuscript. Old results may remain as exploratory provenance, but cannot be pooled with, averaged into, or used to repair missing v4 runs.
 
 ## Resource changes that do not relax the reviewer-facing evidence
 
-Version 3 changes execution cost, not the estimand or the final test evidence. It packs real WikiText tokens without synthetic zero padding; balances a 4,096-token Hessian reservoir across all 128 calibration sequences; captures module activations once per model/seed; derives W4/W5/W6 from the same Hessian; evaluates generation at a conservative RTX-3090 default batch size of four; and avoids rereading the growing JSONL file after every batch. The complete 1,319-item test, native screen for every family, all primary models, both random-allocation families, uniform controls, task/format/error controls, and causal diagnostic remain required.
+Version 4 changes execution cost, provenance, and failure detection without relaxing the estimand or final-test evidence. It uses calibration-repeated GPTQ-W4 screens, preregisters unique random sets, stages and hashes every dataset/model file, locks batch and decoding settings into resumable rows, isolates dual-GPU writes, and analyzes relative error increase and normalized recovery. The complete 1,319-item test, native screens, all primary models, both random-allocation families, uniform controls, task/format/error controls, and block/attention/MLP causal diagnostic remain required.

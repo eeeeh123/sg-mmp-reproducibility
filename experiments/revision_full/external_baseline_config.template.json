@@ -1,0 +1,40 @@
+{
+  "method": "tacq_or_hawq_v2",
+  "source_commit": "FULL_40_CHARACTER_GIT_SHA",
+  "model_revision": "FULL_40_CHARACTER_HUGGING_FACE_SHA",
+  "test_data_used_for_selection": false,
+  "calibration_and_selection_data": {
+    "datasets": [
+      "GSM8K train and/or locked WikiText train only"
+    ],
+    "sample_ids_or_seed": "RECORD_EXACTLY",
+    "sample_count": 0,
+    "test_split_access": "for canonical final evaluation only"
+  },
+  "command": "EXACT_COMMAND_WITHOUT_SECRETS",
+  "environment_lock": {
+    "python": "VERSION",
+    "cuda": "VERSION",
+    "packages_file": "PATH_TO_PIP_FREEZE_OR_CONDA_LOCK"
+  },
+  "adaptations_from_official_source": [
+    "LIST_EVERY_MODEL_OR_EVALUATOR_CHANGE"
+  ],
+  "budget_search": {
+    "candidate_settings_tried": [],
+    "selection_rule": "closest budget without using test accuracy"
+  },
+  "bit_width_parameter_counts": {
+    "4": 0,
+    "8": 0
+  },
+  "bit_accounting_scope": "exactly the eligible q/k/v/o/gate/up/down projection weights listed in the locked model selection",
+  "parameter_weighted_average_bits": 0.0,
+  "canonical_evaluator": {
+    "dataset": "openai/gsm8k/main:test",
+    "n": 1319,
+    "prompt": "direct 5-shot",
+    "decoding": "greedy",
+    "max_new_tokens": 256
+  }
+}

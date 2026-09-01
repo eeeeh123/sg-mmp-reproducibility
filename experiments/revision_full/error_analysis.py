@@ -24,6 +24,7 @@ from experiments.revision_full.protocol import (
 
 OUT = RESULTS_DIR / "error_analysis"
 LABELS = {
+    "correct",
     "arithmetic",
     "reasoning_setup",
     "state_tracking",
@@ -36,8 +37,14 @@ LABELS = {
 
 def rows_by_id(model_key: str, method: str) -> dict[int, dict]:
     path = sample_path(model_key, method)
-    rows = {int(row["doc_id"]): row for row in read_jsonl(path)}
-    if set(rows) != set(range(GSM8K_TEST_SIZE)):
+    loaded = read_jsonl(path)
+    ids = [int(row["doc_id"]) for row in loaded]
+    rows = {doc_id: row for doc_id, row in zip(ids, loaded)}
+    if (
+        len(ids) != GSM8K_TEST_SIZE
+        or len(ids) != len(set(ids))
+        or set(rows) != set(range(GSM8K_TEST_SIZE))
+    ):
         raise RuntimeError(f"Expected {GSM8K_TEST_SIZE} complete rows in {path}")
     return rows
 
@@ -97,6 +104,12 @@ def prepare_annotation(model_key: str, calib_seed: int, sample_size: int) -> Non
     rng = random.Random(20267001)
     rng.shuffle(disagreements)
     selected = sorted(disagreements[: min(sample_size, len(disagreements))], key=lambda x: x["doc_id"])
+    double_coded_doc_ids = set(
+        rng.sample(
+            [int(item["doc_id"]) for item in selected],
+            min(40, len(selected)),
+        )
+    )
 
     OUT.mkdir(parents=True, exist_ok=True)
     stem = f"{model_key}__c{calib_seed}"
@@ -106,13 +119,17 @@ def prepare_annotation(model_key: str, calib_seed: int, sample_size: int) -> Non
     fields = [
         "annotation_id",
         "doc_id",
+        "double_code_required",
         "question",
         "gold",
         "output_a",
         "output_b",
-        "rater1_label",
-        "rater2_label",
-        "consensus_label",
+        "rater1_output_a_label",
+        "rater1_output_b_label",
+        "rater2_output_a_label",
+        "rater2_output_b_label",
+        "consensus_output_a_label",
+        "consensus_output_b_label",
         "notes",
     ]
     with annotation_path.open("w", newline="", encoding="utf-8-sig") as stream:
@@ -131,13 +148,17 @@ def prepare_annotation(model_key: str, calib_seed: int, sample_size: int) -> Non
                 {
                     "annotation_id": annotation_id,
                     "doc_id": doc_id,
+                    "double_code_required": int(doc_id in double_coded_doc_ids),
                     "question": first["question"],
                     "gold": first["gold"],
                     "output_a": first["generation"],
                     "output_b": second["generation"],
-                    "rater1_label": "",
-                    "rater2_label": "",
-                    "consensus_label": "",
+                    "rater1_output_a_label": "",
+                    "rater1_output_b_label": "",
+                    "rater2_output_a_label": "",
+                    "rater2_output_b_label": "",
+                    "consensus_output_a_label": "",
+                    "consensus_output_b_label": "",
                     "notes": "",
                 }
             )
@@ -172,9 +193,47 @@ def cohen_kappa(first: list[str], second: list[str]) -> float | None:
 def summarize_annotations(path: Path) -> None:
     with path.open(encoding="utf-8-sig") as stream:
         rows = list(csv.DictReader(stream))
-    labeled = [row for row in rows if row["consensus_label"].strip()]
+    required_fields = {
+        "annotation_id",
+        "double_code_required",
+        "rater1_output_a_label",
+        "rater1_output_b_label",
+        "rater2_output_a_label",
+        "rater2_output_b_label",
+        "consensus_output_a_label",
+        "consensus_output_b_label",
+    }
+    if not rows or not required_fields.issubset(rows[0]):
+        raise ValueError(
+            "Annotation file uses the obsolete one-label schema; regenerate it with prepare"
+        )
+    annotation_ids = [str(row["annotation_id"]).strip() for row in rows]
+    if len(annotation_ids) != len(set(annotation_ids)):
+        raise ValueError("Duplicate annotation_id values")
+    consensus_fields = ("consensus_output_a_label", "consensus_output_b_label")
+    rater_fields = (
+        "rater1_output_a_label",
+        "rater1_output_b_label",
+        "rater2_output_a_label",
+        "rater2_output_b_label",
+    )
+    labeled = [
+        row for row in rows if all(row[field].strip() for field in consensus_fields)
+    ]
+    partially_labeled = [
+        row
+        for row in rows
+        if any(row[field].strip() for field in consensus_fields)
+        and not all(row[field].strip() for field in consensus_fields)
+    ]
+    if partially_labeled:
+        raise ValueError("Consensus labels must be completed for both output A and B")
     invalid = sorted(
-        {row["consensus_label"].strip() for row in labeled}
+        {
+            row[field].strip()
+            for row in labeled
+            for field in consensus_fields
+        }
         - LABELS
     )
     if invalid:
@@ -183,7 +242,7 @@ def summarize_annotations(path: Path) -> None:
         {
             row[field].strip()
             for row in rows
-            for field in ("rater1_label", "rater2_label")
+            for field in rater_fields
             if row[field].strip()
         }
         - LABELS
@@ -195,20 +254,79 @@ def summarize_annotations(path: Path) -> None:
     paired_ratings = [
         row
         for row in rows
-        if row["rater1_label"].strip() and row["rater2_label"].strip()
+        if all(row[field].strip() for field in rater_fields)
     ]
+    partially_double_coded = [
+        row
+        for row in rows
+        if any(row[field].strip() for field in rater_fields[2:])
+        and not all(row[field].strip() for field in rater_fields)
+    ]
+    if partially_double_coded:
+        raise ValueError("Double-coded rows require both raters to label both outputs")
+    required_double_coded = [
+        row for row in rows if int(row["double_code_required"]) == 1
+    ]
+    missing_required = [
+        row["annotation_id"]
+        for row in required_double_coded
+        if not all(row[field].strip() for field in rater_fields)
+    ]
+    if missing_required:
+        raise ValueError(
+            f"Preregistered double-coded rows are incomplete: {missing_required[:5]}"
+        )
+    key_path = path.with_name(
+        path.name.replace("__blinded_annotation.csv", "__blinding_key.json")
+    )
+    if not key_path.exists():
+        raise FileNotFoundError(f"Missing blinding key: {key_path}")
+    key = json.loads(key_path.read_text(encoding="utf-8"))
+    if set(key) != set(annotation_ids):
+        raise ValueError("Blinding key and annotation IDs do not match exactly")
+    method_counts: dict[str, Counter] = {}
+    for row in labeled:
+        order = key[str(row["annotation_id"]).strip()]["output_order"]
+        if len(order) != 2 or order[0] == order[1]:
+            raise ValueError("Invalid output order in blinding key")
+        for method, field in zip(order, consensus_fields):
+            method_counts.setdefault(method, Counter())[row[field].strip()] += 1
+    rater1 = []
+    rater2 = []
+    for row in paired_ratings:
+        rater1.extend(
+            [
+                row["rater1_output_a_label"].strip(),
+                row["rater1_output_b_label"].strip(),
+            ]
+        )
+        rater2.extend(
+            [
+                row["rater2_output_a_label"].strip(),
+                row["rater2_output_b_label"].strip(),
+            ]
+        )
     summary = {
         "annotation_file": str(path),
+        "blinding_key": str(key_path),
         "rows": len(rows),
-        "consensus_labeled": len(labeled),
+        "consensus_labeled_cases": len(labeled),
+        "consensus_labeled_outputs": 2 * len(labeled),
         "consensus_counts": dict(
-            Counter(row["consensus_label"].strip() for row in labeled)
+            Counter(
+                row[field].strip()
+                for row in labeled
+                for field in consensus_fields
+            )
         ),
-        "double_coded": len(paired_ratings),
-        "cohen_kappa": cohen_kappa(
-            [row["rater1_label"].strip() for row in paired_ratings],
-            [row["rater2_label"].strip() for row in paired_ratings],
-        ),
+        "per_method_consensus_counts": {
+            method: dict(counts) for method, counts in sorted(method_counts.items())
+        },
+        "double_coded_cases": len(paired_ratings),
+        "required_double_coded_cases": len(required_double_coded),
+        "double_coded_outputs": 2 * len(paired_ratings),
+        "cohen_kappa_output_labels": cohen_kappa(rater1, rater2),
+        "agreement_unit": "output-level error label; two outputs per sampled case",
     }
     output = path.with_name(path.stem + "__summary.json")
     output.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")

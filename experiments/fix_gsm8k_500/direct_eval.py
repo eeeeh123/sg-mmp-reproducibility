@@ -468,6 +468,11 @@ def done_doc_ids(path: Path) -> set[int]:
     return ids
 
 
+# Revision pipelines may attach immutable provenance without changing the
+# historical evaluator's CLI or legacy output schema.
+ROW_METADATA: dict = {}
+
+
 @torch.no_grad()
 def evaluate(model_key: str, method: str, n: int, batch_size: int, max_new_tokens: int, force: bool = False):
     status("eval_start", model=model_key, method=method, n=n, batch_size=batch_size, max_new_tokens=max_new_tokens)
@@ -482,6 +487,26 @@ def evaluate(model_key: str, method: str, n: int, batch_size: int, max_new_token
         for row in existing_rows
         if "doc_id" in row
     }
+    existing_ids = [int(row["doc_id"]) for row in existing_rows if "doc_id" in row]
+    expected_metadata = {
+        **ROW_METADATA,
+        "eval_batch_size_per_gpu": batch_size,
+        "max_new_tokens": max_new_tokens,
+    }
+    if (
+        len(existing_rows) != len(existing_ids)
+        or len(existing_ids) != len(set(existing_ids))
+        or any(index not in indices for index in existing_ids)
+        or any(int(row.get("correct", -1)) not in (0, 1) for row in existing_rows)
+        or any(
+            any(row.get(key) != value for key, value in expected_metadata.items())
+            for row in existing_rows
+        )
+    ):
+        raise RuntimeError(
+            f"Existing sample file has missing fields, duplicate IDs, or out-of-protocol rows: {out_path}. "
+            "Inspect it or rerun this method with --force; do not append mixed evidence."
+        )
     done = set(existing_by_id)
     running_correct = sum(int(row["correct"]) for row in existing_by_id.values())
     running_total = len(existing_by_id)
@@ -536,6 +561,7 @@ def evaluate(model_key: str, method: str, n: int, batch_size: int, max_new_token
             )
             rows.append(
                 {
+                    **expected_metadata,
                     "doc_id": doc_id,
                     "question": ex["question"],
                     "answer": ex["answer"],

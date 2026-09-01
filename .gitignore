@@ -6,6 +6,7 @@
 /server_plans/
 server_all.sh
 server_all.log
+server_env.sh
 *.tar
 *.tar.gz
 /*.zip

@@ -26,7 +26,7 @@ STATE_METADATA_DIR = OUT / "state_metadata"
 SCREEN_DIR = OUT / "screens"
 RESULTS_DIR = OUT / "results"
 
-PROTOCOL_VERSION = "revision-full-v3"
+PROTOCOL_VERSION = "revision-full-v4"
 GSM8K_TEST_SIZE = 1319
 CAUSAL_PATCH_N = 200
 CAUSAL_PATCH_SEED = 20268001
@@ -35,6 +35,7 @@ SCREEN_SEEDS = (20260831, 20260901, 20260902)
 SELECTION_BOOTSTRAP_REPLICATES = 2000
 SELECTION_BOOTSTRAP_SEED = 20269001
 CALIB_SEEDS = (41, 97, 193)
+SCREEN_CALIB_SEEDS = CALIB_SEEDS
 CALIB_SAMPLES = 128
 CALIB_LENGTH = 2048
 CALIB_HESSIAN_TOKENS = 4096
@@ -42,8 +43,23 @@ TARGET_AVG_BITS = 5.0
 RANDOM_ALLOCATIONS = 30
 RANDOM_CALIB_SEED = CALIB_SEEDS[0]
 GROUP_SIZE = 128
-DEFAULT_EVAL_BATCH_SIZE = 4
+DEFAULT_EVAL_BATCH_SIZE = int(os.environ.get("REVISION_FULL_EVAL_BATCH_SIZE", "4"))
+DEFAULT_FORMAT_BATCH_SIZE = int(
+    os.environ.get("REVISION_FULL_FORMAT_BATCH_SIZE", "2")
+)
+MAX_NEW_TOKENS = 256
 FEWSHOT_TRAIN_INDICES = tuple(range(5))
+
+if DEFAULT_EVAL_BATCH_SIZE <= 0 or DEFAULT_FORMAT_BATCH_SIZE <= 0:
+    raise ValueError("Evaluation batch sizes must be positive")
+
+BROAD_TASKS = (
+    "arc_challenge",
+    "hellaswag",
+    "mmlu",
+    "mmlu_high_school_mathematics",
+)
+EXTRA_TASKS = ("svamp", "asdiv_gen", "hendrycks_math500", "truthfulqa_gen")
 
 MODEL_SPECS = {
     "qwen05": {
@@ -96,6 +112,90 @@ ROLE_SHORT_NAMES = {
 def json_sha256(value) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def make_unique_random_layer_allocations(
+    module_rows: list[dict],
+    target_w8_names: set[str],
+    selected_layers: list[int],
+    count: int = RANDOM_ALLOCATIONS,
+    seed: int = 20261001,
+) -> list[list[int]]:
+    """Pre-register distinct layer allocations at the SG-MMP W8 budget."""
+    qkv_names = {
+        row["name"] for row in module_rows if row["short"] in QKV_SHORT_NAMES
+    }
+    target_bits = average_bits(module_rows, target_w8_names)
+    all_layers = sorted({int(row["layer"]) for row in module_rows})
+    layer_count = len(selected_layers)
+    if not 0 < layer_count <= len(all_layers):
+        raise ValueError("selected_layers must define a non-empty feasible allocation")
+    rng = random.Random(seed)
+    allocations: list[list[int]] = []
+    seen: set[tuple[int, ...]] = set()
+    attempts = 0
+    while len(allocations) < count and attempts < 200_000:
+        attempts += 1
+        candidate = tuple(sorted(rng.sample(all_layers, layer_count)))
+        if candidate in seen:
+            continue
+        names = qkv_names | {
+            row["name"]
+            for row in module_rows
+            if int(row["layer"]) in candidate
+            and row["short"] not in QKV_SHORT_NAMES
+        }
+        if abs(average_bits(module_rows, names) - target_bits) > 0.01:
+            continue
+        seen.add(candidate)
+        allocations.append(list(candidate))
+    if len(allocations) != count:
+        raise RuntimeError(
+            f"Could only construct {len(allocations)}/{count} distinct matched layer allocations"
+        )
+    return allocations
+
+
+def make_unique_random_module_allocations(
+    module_rows: list[dict],
+    target_w8_names: set[str],
+    count: int = RANDOM_ALLOCATIONS,
+    seed: int = 20262001,
+) -> list[list[str]]:
+    """Pre-register distinct module allocations within 0.01 average bit."""
+    target_bits = average_bits(module_rows, target_w8_names)
+    target_params = sum(
+        int(row["n_params"])
+        for row in module_rows
+        if row["name"] in target_w8_names
+    )
+    rng = random.Random(seed)
+    allocations: list[list[str]] = []
+    seen: set[tuple[str, ...]] = set()
+    attempts = 0
+    while len(allocations) < count and attempts < 500_000:
+        attempts += 1
+        candidates = list(module_rows)
+        rng.shuffle(candidates)
+        chosen: set[str] = set()
+        used = 0
+        for row in candidates:
+            size = int(row["n_params"])
+            if used + size <= target_params:
+                chosen.add(row["name"])
+                used += size
+        key = tuple(sorted(chosen))
+        if not key or key in seen:
+            continue
+        if abs(average_bits(module_rows, chosen) - target_bits) > 0.01:
+            continue
+        seen.add(key)
+        allocations.append(list(key))
+    if len(allocations) != count:
+        raise RuntimeError(
+            f"Could only construct {len(allocations)}/{count} distinct matched module allocations"
+        )
+    return allocations
 
 
 def make_disjoint_screen_splits(

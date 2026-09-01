@@ -9,6 +9,7 @@ against that same SHA on the next run.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
@@ -60,6 +61,21 @@ IGNORE_PATTERNS = [
 ]
 
 
+def stable_model_record(record: dict) -> dict:
+    """Drop download-time fields while retaining every model identity field."""
+    required = [
+        "repo_id",
+        "resolved_revision",
+        "local_directory",
+        "weight_bytes",
+        "weight_file_records",
+    ]
+    missing = [key for key in required if key not in record]
+    if missing:
+        raise RuntimeError(f"Model manifest record lacks {missing}")
+    return {key: record[key] for key in required}
+
+
 def read_manifest() -> dict:
     if not MANIFEST_PATH.exists():
         return {"schema_version": 1, "models": {}}
@@ -96,8 +112,22 @@ def verify_local_model(path: Path) -> dict:
         raise RuntimeError(f"Missing or incomplete safetensors weights in {path}")
     if not any((path / name).exists() for name in ["tokenizer.json", "tokenizer.model"]):
         raise RuntimeError(f"Missing tokenizer assets in {path}")
+    files = []
+    for item in weights:
+        digest = hashlib.sha256()
+        with item.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        files.append(
+            {
+                "name": item.name,
+                "bytes": item.stat().st_size,
+                "sha256": digest.hexdigest(),
+            }
+        )
     return {
         "weight_files": [item.name for item in weights],
+        "weight_file_records": files,
         "weight_bytes": weight_bytes,
     }
 

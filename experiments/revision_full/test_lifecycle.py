@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from experiments.revision_full import lifecycle, protocol, run as revision_run
 from experiments.revision_full.make_server_plan import commands
+from experiments.revision_full.make_server_shard import shard_commands
 
 
 class LifecycleTests(unittest.TestCase):
@@ -18,14 +19,38 @@ class LifecycleTests(unittest.TestCase):
         self.states = self.root / "states"
         self.metadata = self.root / "state_metadata"
         self.receipts = self.root / "receipts"
+        self.screens = self.root / "screens"
+        self.data_hash = "d" * 64
+        self.model_revision = "a" * 40
+        self.dataset_snapshot = {
+            "manifest": "revision_full/outputs/dataset_snapshot_manifest.json",
+            "manifest_sha256": self.data_hash,
+        }
+        self.model_snapshot = {
+            "repo_id": "test/qwen05",
+            "resolved_revision": self.model_revision,
+            "weight_file_records": [{"path": "model.safetensors", "sha256": "b" * 64}],
+        }
         self.patches = [
+            patch.object(lifecycle, "OUT", self.root),
             patch.object(lifecycle, "RESULTS_DIR", self.results),
             patch.object(lifecycle, "RECEIPT_DIR", self.receipts),
+            patch.object(lifecycle, "SCREEN_DIR", self.screens),
             patch.object(protocol, "STATE_DIR", self.states),
             patch.object(protocol, "STATE_METADATA_DIR", self.metadata),
         ]
         for item in self.patches:
             item.start()
+        (self.root / "protocol_lock.json").write_text(
+            json.dumps(
+                {
+                    "protocol_version": protocol.PROTOCOL_VERSION,
+                    "dataset_snapshot": self.dataset_snapshot,
+                    "model_snapshots": {"qwen05": self.model_snapshot},
+                }
+            ),
+            encoding="utf-8",
+        )
 
     def tearDown(self):
         for item in reversed(self.patches):
@@ -37,7 +62,21 @@ class LifecycleTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as stream:
             for doc_id in ids:
-                stream.write(json.dumps({"doc_id": doc_id, "correct": 1}) + "\n")
+                stream.write(
+                    json.dumps(
+                        {
+                            "protocol_version": protocol.PROTOCOL_VERSION,
+                            "eval_batch_size_per_gpu": protocol.DEFAULT_EVAL_BATCH_SIZE,
+                            "max_new_tokens": protocol.MAX_NEW_TOKENS,
+                            "dataset_manifest_sha256": self.data_hash,
+                            "model_revision": self.model_revision,
+                            "canonical_test_set": "openai/gsm8k/main:test:all-1319",
+                            "doc_id": doc_id,
+                            "correct": 1,
+                        }
+                    )
+                    + "\n"
+                )
         return path
 
     def write_state(self, variant: str) -> tuple[Path, Path]:
@@ -74,6 +113,22 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(receipt["evidence"][0]["sha256"], lifecycle.sha256(sample))
         self.assertTrue(lifecycle.receipt_path("qwen05", 97, "gptq_w5").exists())
 
+    def test_stale_result_provenance_never_deletes_state(self):
+        with patch.object(lifecycle, "GSM8K_TEST_SIZE", 2):
+            state, _ = self.write_state("gptq_w5")
+            sample = self.write_sample("gptq_w5", [0, 1])
+            sample.write_text(
+                sample.read_text(encoding="utf-8").replace(
+                    self.model_revision, "c" * 40
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "incomplete"):
+                lifecycle.cleanup_state_artifact("qwen05", 97, "gptq_w5")
+
+            self.assertTrue(state.exists())
+
     def test_seed_41_w4_requires_all_downstream_consumers(self):
         path = lifecycle.gsm8k_sample_path(
             "qwen15", "gptq_w4", protocol.RANDOM_CALIB_SEED
@@ -101,12 +156,141 @@ class LifecycleTests(unittest.TestCase):
         self.assertFalse(state.exists())
         self.assertTrue(metadata.exists())
 
+    def test_screen_state_cleanup_requires_exact_gptq_screen(self):
+        variant = "screen_gptq_w4_split0"
+        state = protocol.state_path("qwen05", 41, variant)
+        metadata = protocol.state_metadata_path("qwen05", 41, variant)
+        state.parent.mkdir(parents=True, exist_ok=True)
+        metadata.parent.mkdir(parents=True, exist_ok=True)
+        state.write_bytes(b"screen-state")
+        metadata.write_text(
+            json.dumps(
+                {
+                    "protocol_version": protocol.PROTOCOL_VERSION,
+                    "split_id": 0,
+                    "calibration_seed": 41,
+                    "screened_layers": [0, 1],
+                    "dataset_snapshot": self.dataset_snapshot,
+                    "model_snapshot": self.model_snapshot,
+                }
+            ),
+            encoding="utf-8",
+        )
+        screen = self.screens / "qwen05" / "split_0.jsonl"
+        screen.parent.mkdir(parents=True, exist_ok=True)
+        rows = [
+            {
+                "protocol_version": protocol.PROTOCOL_VERSION,
+                "type": "baseline",
+                "model_key": "qwen05",
+                "split_id": 0,
+                "quantizer": "GPTQ-W4",
+                "calibration_seed": 41,
+                "dataset_manifest_sha256": self.data_hash,
+                "model_revision": self.model_revision,
+                "eval_batch_size_per_gpu": protocol.DEFAULT_EVAL_BATCH_SIZE,
+                "max_new_tokens": protocol.MAX_NEW_TOKENS,
+            },
+            *[
+                {
+                    "protocol_version": protocol.PROTOCOL_VERSION,
+                    "type": "layer",
+                    "model_key": "qwen05",
+                    "split_id": 0,
+                    "layer": layer,
+                    "quantizer": "GPTQ-W4",
+                    "calibration_seed": 41,
+                    "dataset_manifest_sha256": self.data_hash,
+                    "model_revision": self.model_revision,
+                    "eval_batch_size_per_gpu": protocol.DEFAULT_EVAL_BATCH_SIZE,
+                    "max_new_tokens": protocol.MAX_NEW_TOKENS,
+                }
+                for layer in [0, 1]
+            ],
+        ]
+        screen.write_text(
+            "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+        )
+
+        receipt = lifecycle.cleanup_screen_state_artifact("qwen05", 0, 41)
+
+        self.assertFalse(state.exists())
+        self.assertEqual(receipt["action"], "reconstructible_screen_state_deleted")
+
+    def test_causal_completion_requires_all_three_interventions(self):
+        with (
+            patch.object(lifecycle, "CAUSAL_PATCH_N", 2),
+            patch.object(lifecycle, "fixed_causal_patch_indices", return_value=[0, 1]),
+        ):
+            result, summary = lifecycle.causal_result_paths("qwen05", 41)
+            result.parent.mkdir(parents=True, exist_ok=True)
+            rows = []
+            for doc_id in [0, 1]:
+                rows.append(
+                    {
+                        "protocol_version": protocol.PROTOCOL_VERSION,
+                        "dataset_manifest_sha256": self.data_hash,
+                        "model_revision": self.model_revision,
+                        "calibration_seed": 41,
+                        "doc_id": doc_id,
+                        "w4_correct": doc_id,
+                        "final_answer_tokens": 1,
+                        "patches": [
+                            {"intervention": intervention, "layer": layer}
+                            for intervention in ["block", "attention", "mlp"]
+                            for layer in [0, 1]
+                        ],
+                    }
+                )
+            result.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+            )
+            summary.write_text(
+                json.dumps(
+                    {
+                        "protocol_version": protocol.PROTOCOL_VERSION,
+                        "dataset_manifest_sha256": self.data_hash,
+                        "model_revision": self.model_revision,
+                        "calibration_seed": 41,
+                        "n": 2,
+                        "interventions": ["block", "attention", "mlp"],
+                        "layers": [
+                            {"intervention": intervention, "layer": layer}
+                            for intervention in ["block", "attention", "mlp"]
+                            for layer in [0, 1]
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(lifecycle.causal_complete("qwen05", 41))
+
 
 class ServerPlanLifecycleTests(unittest.TestCase):
     def test_complete_full_result_skips_before_state_lookup(self):
         with (
-            patch.object(revision_run, "require_protocol"),
+            patch.object(revision_run, "require_locked_batch"),
             patch.object(revision_run, "gsm8k_complete", return_value=True),
+            patch.object(revision_run, "dataset_provenance", return_value={"manifest_sha256": "data"}),
+            patch.object(
+                revision_run,
+                "model_provenance",
+                return_value={"resolved_revision": "a" * 40},
+            ),
+            patch.object(
+                revision_run,
+                "read_jsonl",
+                return_value=[
+                    {
+                        "protocol_version": protocol.PROTOCOL_VERSION,
+                        "dataset_manifest_sha256": "data",
+                        "model_revision": "a" * 40,
+                        "canonical_test_set": "openai/gsm8k/main:test:all-1319",
+                        "eval_batch_size_per_gpu": protocol.DEFAULT_EVAL_BATCH_SIZE,
+                        "max_new_tokens": protocol.MAX_NEW_TOKENS,
+                    }
+                ],
+            ),
             patch.object(revision_run, "configure_direct_eval") as configure,
             patch.object(revision_run, "status"),
         ):
@@ -137,6 +321,16 @@ class ServerPlanLifecycleTests(unittest.TestCase):
             "--model qwen05 --calib-seed 41 --variant gptq_w4"
         )
         self.assertLess(causal, cleanup)
+
+    def test_two_gpu_shards_partition_every_model_command(self):
+        gpu0 = shard_commands(["gemma2", "qwen05"])
+        gpu1 = shard_commands(["smollm", "qwen15"])
+        self.assertFalse(set(gpu0) & set(gpu1))
+        model_commands = {
+            command for command in commands() if "--model " in command
+        }
+        self.assertEqual(set(gpu0) | set(gpu1), model_commands)
+        self.assertFalse(any("analyze.py" in command for command in gpu0 + gpu1))
 
 
 if __name__ == "__main__":

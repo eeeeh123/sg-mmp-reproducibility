@@ -1,0 +1,44 @@
+task: asdiv_gen
+dataset_path: EleutherAI/asdiv
+dataset_name: null
+output_type: generate_until
+training_split: null
+validation_split: validation
+test_split: null
+doc_to_text: "Solve the following problem and end with 'The final answer is [answer]'.\nProblem: {{body}} {{question}}\n"
+doc_to_target: "{{answer.split(' (')[0]}}"
+should_decontaminate: true
+doc_to_decontamination_query: "{{body}} {{question}}"
+metric_list:
+  - metric: exact_match
+    aggregation: mean
+    higher_is_better: true
+    ignore_case: true
+    ignore_punctuation: true
+    regexes_to_ignore:
+      - ","
+      - "\\$"
+      - "\\.00$"
+      - " "
+generation_kwargs:
+  until:
+    - "Question:"
+    - "\n\n"
+  do_sample: false
+  temperature: 0.0
+  max_gen_toks: 256
+repeats: 1
+num_fewshot: 0
+filter_list:
+  - name: strict-match
+    filter:
+      - function: regex
+        group_select: -1
+        regex_pattern: "The final answer is ((-?[$0-9.,]{2,})|(-?[0-9]+))"
+      - function: take_first
+  - name: flexible-extract
+    filter:
+      - function: regex
+        group_select: -1
+        regex_pattern: "(-?[$0-9.,]{2,})|(-?[0-9]+)"
+      - function: take_first

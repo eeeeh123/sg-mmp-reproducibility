@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import argparse
+import hashlib
 import importlib
 import json
 import math
@@ -13,7 +15,6 @@ from pathlib import Path
 
 sys.path.insert(0, ".")
 
-from experiments.fix_gsm8k_500.direct_eval import find_arrow
 from experiments.revision_full.protocol import (
     GROUP_SIZE,
     MODEL_SPECS,
@@ -22,8 +23,13 @@ from experiments.revision_full.protocol import (
     STATE_DIR,
 )
 from experiments.revision_full.download_models import MODEL_SOURCES
+from experiments.revision_full.download_core_datasets import (
+    MANIFEST_PATH as DATASET_MANIFEST_PATH,
+    PANEL_TASKS,
+    snapshot_sha256 as dataset_snapshot_sha256,
+    verify_cache_files,
+)
 from experiments.revision_full.readiness import preflight_errors
-from ptq.data import _latest_arrow
 
 
 EXPECTED_VERSIONS = {
@@ -44,6 +50,24 @@ MIN_PERSISTENT_FREE_GIB = 30
 RECOMMENDED_PERSISTENT_FREE_GIB = 60
 MIN_RAM_GIB = 60
 RECOMMENDED_RAM_GIB = 90
+
+
+def storage_thresholds(
+    state_peak_estimates: list[float], concurrent_models: int
+) -> dict:
+    concurrent_peaks = sorted(state_peak_estimates, reverse=True)[:concurrent_models]
+    estimated = sum(concurrent_peaks) or 12.0
+    minimum_state = max(16, math.ceil(1.25 * estimated + 2))
+    recommended_state = max(24, math.ceil(1.5 * estimated + 5))
+    return {
+        "concurrent_peaks": concurrent_peaks,
+        "estimated_state_peak_gib": estimated,
+        "minimum_state_free_gib": minimum_state,
+        "recommended_state_free_gib": recommended_state,
+        "minimum_shared_free_gib": MIN_PERSISTENT_FREE_GIB + minimum_state,
+        "recommended_shared_free_gib": RECOMMENDED_PERSISTENT_FREE_GIB
+        + recommended_state,
+    }
 
 
 def estimate_stream_state_peak_gib(model_dir: Path, weight_bytes: int) -> float:
@@ -92,6 +116,14 @@ def version_of(module_name: str) -> str:
     return str(getattr(module, "__version__", "unknown"))
 
 
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def system_ram_gib() -> float | None:
     meminfo = Path("/proc/meminfo")
     if not meminfo.exists():
@@ -103,6 +135,14 @@ def system_ram_gib() -> float | None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--expected-gpus", type=int, default=1)
+    parser.add_argument("--concurrent-models", type=int, default=1)
+    args = parser.parse_args()
+    if not 1 <= args.concurrent_models <= len(MODEL_SPECS):
+        raise SystemExit("--concurrent-models must be between 1 and 4")
+    if args.expected_gpus < args.concurrent_models:
+        raise SystemExit("--expected-gpus must be at least --concurrent-models")
     errors: list[str] = []
     warnings: list[str] = []
     packages = {}
@@ -131,6 +171,11 @@ def main() -> None:
                 errors.append(f"GPU {index} has only {memory_gib:.1f} GiB")
             elif memory_gib < RECOMMENDED_GPU_GIB:
                 warnings.append(f"GPU {index} is below the recommended 24-GB class")
+        if torch.cuda.device_count() < args.expected_gpus:
+            errors.append(
+                f"only {torch.cuda.device_count()} CUDA devices are visible; "
+                f"the launch plan expects {args.expected_gpus}"
+            )
     except Exception as exc:
         errors.append(f"CUDA inspection failed: {exc}")
 
@@ -170,33 +215,78 @@ def main() -> None:
         revision = str(snapshot.get("resolved_revision", ""))
         if snapshot.get("repo_id") != expected_source["repo_id"] or len(revision) != 40:
             errors.append(f"missing pinned upstream revision for {model_key}")
+        file_records = snapshot.get("weight_file_records", [])
+        if not file_records:
+            errors.append(
+                f"model manifest lacks file hashes for {model_key}; rerun download_models.py"
+            )
+        else:
+            for record in file_records:
+                path = model_dir / str(record.get("name", ""))
+                if not path.exists():
+                    errors.append(f"missing frozen model file: {path}")
+                    continue
+                if path.stat().st_size != int(record.get("bytes", -1)):
+                    errors.append(f"model file size changed: {path}")
+                    continue
+                if sha256(path) != record.get("sha256"):
+                    errors.append(f"model file hash changed: {path}")
 
     datasets = {}
-    for split in ("train", "test"):
-        try:
-            datasets[f"gsm8k_{split}"] = str(find_arrow(split))
-        except FileNotFoundError as exc:
-            errors.append(str(exc))
-    wikitext = _latest_arrow("wikitext-train.arrow")
-    if wikitext is None:
-        errors.append("WikiText train Arrow cache is missing")
+
+    dataset_manifest = {}
+    if not DATASET_MANIFEST_PATH.exists():
+        errors.append(
+            "missing frozen core/panel dataset manifest; run download_core_datasets.py"
+        )
     else:
-        datasets["wikitext_train"] = str(wikitext)
+        try:
+            dataset_manifest = json.loads(
+                DATASET_MANIFEST_PATH.read_text(encoding="utf-8")
+            )
+            if dataset_manifest.get("schema_version") != 2:
+                errors.append("dataset snapshot manifest schema is not v2")
+            if dataset_manifest.get("snapshot_sha256") != dataset_snapshot_sha256(
+                dataset_manifest
+            ):
+                errors.append("dataset snapshot manifest identity hash is invalid")
+            task_inventory = dataset_manifest.get("panels", {}).get("tasks", {})
+            if set(task_inventory) != set(PANEL_TASKS):
+                errors.append("frozen panel task inventory is incomplete")
+            if any(
+                int(task_inventory.get(task, {}).get("evaluation_docs", 0)) <= 0
+                for task in PANEL_TASKS
+            ):
+                errors.append("one or more frozen panel tasks have no evaluation documents")
+            for dataset_key, record in dataset_manifest.get("core", {}).items():
+                datasets[dataset_key] = [
+                    item.get("path") for item in record.get("cache_files", [])
+                ]
+            errors.extend(verify_cache_files(dataset_manifest))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            errors.append(f"invalid dataset snapshot manifest: {exc}")
+    if os.environ.get("HF_HUB_OFFLINE") != "1" or os.environ.get(
+        "HF_DATASETS_OFFLINE"
+    ) != "1":
+        errors.append(
+            "formal execution must export HF_HUB_OFFLINE=1 and HF_DATASETS_OFFLINE=1 "
+            "after dataset/model staging"
+        )
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     persistent_disk = shutil.disk_usage(ROOT)
     state_disk = shutil.disk_usage(STATE_DIR)
     persistent_free_gib = persistent_disk.free / 1024**3
     state_free_gib = state_disk.free / 1024**3
-    estimated_state_peak_gib = max(state_peak_estimates, default=12.0)
-    min_state_free_gib = max(16, math.ceil(1.25 * estimated_state_peak_gib + 2))
-    recommended_state_free_gib = max(
-        24, math.ceil(1.5 * estimated_state_peak_gib + 5)
-    )
+    storage = storage_thresholds(state_peak_estimates, args.concurrent_models)
+    concurrent_peaks = storage["concurrent_peaks"]
+    estimated_state_peak_gib = storage["estimated_state_peak_gib"]
+    min_state_free_gib = storage["minimum_state_free_gib"]
+    recommended_state_free_gib = storage["recommended_state_free_gib"]
     same_filesystem = os.stat(ROOT).st_dev == os.stat(STATE_DIR).st_dev
     if same_filesystem:
-        minimum = MIN_PERSISTENT_FREE_GIB + min_state_free_gib
-        recommended = RECOMMENDED_PERSISTENT_FREE_GIB + recommended_state_free_gib
+        minimum = storage["minimum_shared_free_gib"]
+        recommended = storage["recommended_shared_free_gib"]
         if persistent_free_gib < minimum:
             errors.append(
                 f"only {persistent_free_gib:.1f} GiB free on the shared results/state filesystem; "
@@ -230,13 +320,15 @@ def main() -> None:
             )
 
     ram_gib = system_ram_gib()
-    if ram_gib is not None and ram_gib < MIN_RAM_GIB:
+    minimum_ram_gib = max(MIN_RAM_GIB, 32 * args.concurrent_models)
+    recommended_ram_gib = max(RECOMMENDED_RAM_GIB, 48 * args.concurrent_models)
+    if ram_gib is not None and ram_gib < minimum_ram_gib:
         errors.append(
-            f"only {ram_gib:.1f} GiB system RAM; at least {MIN_RAM_GIB} GiB is required"
+            f"only {ram_gib:.1f} GiB system RAM; at least {minimum_ram_gib} GiB is required"
         )
-    elif ram_gib is not None and ram_gib < RECOMMENDED_RAM_GIB:
+    elif ram_gib is not None and ram_gib < recommended_ram_gib:
         warnings.append(
-            f"{ram_gib:.1f} GiB RAM; {RECOMMENDED_RAM_GIB} GiB is recommended"
+            f"{ram_gib:.1f} GiB RAM; {recommended_ram_gib} GiB is recommended"
         )
 
     errors.extend(preflight_errors())
@@ -251,15 +343,28 @@ def main() -> None:
             "state_free_disk_gib": round(state_free_gib, 1),
             "state_dir": str(STATE_DIR),
             "state_filesystem_is_persistent_filesystem": same_filesystem,
-            "estimated_largest_stream_state_peak_gib": round(
+            "estimated_concurrent_stream_state_peak_gib": round(
                 estimated_state_peak_gib, 2
             ),
+            "expected_gpus": args.expected_gpus,
+            "concurrent_models": args.concurrent_models,
+            "concurrent_model_state_peaks_gib": [
+                round(value, 2) for value in concurrent_peaks
+            ],
             "minimum_state_free_gib": min_state_free_gib,
+            "recommended_state_free_gib": recommended_state_free_gib,
+            "minimum_shared_free_gib": storage["minimum_shared_free_gib"],
+            "recommended_shared_free_gib": storage[
+                "recommended_shared_free_gib"
+            ],
+            "minimum_ram_gib": minimum_ram_gib,
+            "recommended_ram_gib": recommended_ram_gib,
         },
         "gpus": gpu_rows,
         "packages": packages,
         "models": model_rows,
         "model_snapshot_manifest": str(snapshot_manifest_path),
+        "dataset_snapshot_manifest": str(DATASET_MANIFEST_PATH),
         "datasets": datasets,
         "warnings": warnings,
         "errors": errors,

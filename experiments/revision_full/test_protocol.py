@@ -10,10 +10,15 @@ from experiments.revision_full.protocol import (
     average_bits,
     fixed_causal_patch_indices,
     make_disjoint_screen_splits,
+    make_unique_random_layer_allocations,
+    make_unique_random_module_allocations,
     role_priority_budget_match,
     scored_budget_match,
     select_layers_under_budget,
 )
+from experiments.revision_full.server_preflight import storage_thresholds
+from experiments.revision_full.download_core_datasets import snapshot_sha256
+from experiments.revision_full.download_models import stable_model_record
 
 
 class ProtocolTests(unittest.TestCase):
@@ -86,6 +91,77 @@ class ProtocolTests(unittest.TestCase):
         scores = {row["name"]: float(index + 1) for index, row in enumerate(modules)}
         matched = scored_budget_match(modules, target, scores)
         self.assertEqual(matched["actual_w8_params"], matched["target_w8_params"])
+
+    def test_random_controls_are_unique_deterministic_and_budget_matched(self):
+        modules = [
+            {
+                "name": f"model.layers.{layer}.{short}",
+                "layer": layer,
+                "short": short,
+                "n_params": 100,
+            }
+            for layer in range(6)
+            for short in ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj"]
+        ]
+        target = {
+            row["name"]
+            for row in modules
+            if row["short"] in QKV_SHORT_NAMES or row["layer"] in {0, 1}
+        }
+        layers = make_unique_random_layer_allocations(
+            modules, target, [0, 1], count=5, seed=9
+        )
+        module_sets = make_unique_random_module_allocations(
+            modules, target, count=5, seed=10
+        )
+        self.assertEqual(len({tuple(row) for row in layers}), 5)
+        self.assertEqual(len({tuple(row) for row in module_sets}), 5)
+        target_bits = average_bits(modules, target)
+        for selected in module_sets:
+            self.assertAlmostEqual(
+                average_bits(modules, set(selected)), target_bits, places=8
+            )
+
+    def test_two_gpu_storage_threshold_sums_concurrent_states(self):
+        thresholds = storage_thresholds([9.90, 7.88, 6.41, 1.75], 2)
+        self.assertAlmostEqual(thresholds["estimated_state_peak_gib"], 17.78)
+        self.assertEqual(thresholds["minimum_shared_free_gib"], 55)
+        self.assertEqual(thresholds["recommended_shared_free_gib"], 92)
+
+    def test_dataset_identity_ignores_cache_path_and_creation_time(self):
+        def manifest(path, created):
+            return {
+                "schema_version": 2,
+                "created_at_utc": created,
+                "core": {
+                    "openai/gsm8k/main/test": {
+                        "splits": {"data": {"rows": 1319, "fingerprint": "abc"}},
+                        "cache_files": [
+                            {"path": path, "bytes": 7, "sha256": "f" * 64}
+                        ],
+                    }
+                },
+                "panels": {"tasks": {}, "datasets": {}, "cache_files": []},
+            }
+
+        self.assertEqual(
+            snapshot_sha256(manifest("/server/a.arrow", "first")),
+            snapshot_sha256(manifest("/other/a.arrow", "second")),
+        )
+
+    def test_model_identity_ignores_download_timestamp(self):
+        base = {
+            "repo_id": "org/model",
+            "resolved_revision": "a" * 40,
+            "local_directory": "models/model",
+            "weight_bytes": 10,
+            "weight_file_records": [
+                {"name": "model.safetensors", "bytes": 10, "sha256": "b" * 64}
+            ],
+        }
+        first = {**base, "downloaded_at_utc": "first"}
+        second = {**base, "downloaded_at_utc": "second"}
+        self.assertEqual(stable_model_record(first), stable_model_record(second))
 
 
 if __name__ == "__main__":

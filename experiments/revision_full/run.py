@@ -32,10 +32,14 @@ from experiments.revision_full.protocol import (
     CALIB_SEEDS,
     CAUSAL_PATCH_N,
     CAUSAL_PATCH_SEED,
+    BROAD_TASKS,
     DEFAULT_EVAL_BATCH_SIZE,
+    DEFAULT_FORMAT_BATCH_SIZE,
     ELIGIBLE_SHORT_NAMES,
+    EXTRA_TASKS,
     GSM8K_TEST_SIZE,
     GROUP_SIZE,
+    MAX_NEW_TOKENS,
     MODEL_SPECS,
     OUT,
     PROTOCOL_VERSION,
@@ -46,6 +50,7 @@ from experiments.revision_full.protocol import (
     RESULTS_DIR,
     SCREEN_DIR,
     SCREEN_N,
+    SCREEN_CALIB_SEEDS,
     SCREEN_SEEDS,
     SELECTION_BOOTSTRAP_REPLICATES,
     SELECTION_BOOTSTRAP_SEED,
@@ -56,6 +61,8 @@ from experiments.revision_full.protocol import (
     fixed_causal_patch_indices,
     json_sha256,
     make_disjoint_screen_splits,
+    make_unique_random_layer_allocations,
+    make_unique_random_module_allocations,
     method_id,
     role_priority_budget_match,
     scored_budget_match,
@@ -69,8 +76,15 @@ from experiments.revision_full.lifecycle import (
     cleanup_state_artifact,
     extra_complete,
     gsm8k_complete,
+    gsm8k_sample_path,
     state_consumers_complete,
+    cleanup_screen_state_artifact,
 )
+from experiments.revision_full.download_core_datasets import (
+    MANIFEST_PATH as DATASET_MANIFEST_PATH,
+    snapshot_sha256 as dataset_snapshot_sha256,
+)
+from experiments.revision_full.download_models import stable_model_record
 
 
 for directory in [OUT, STATE_DIR, STATE_METADATA_DIR, SCREEN_DIR, RESULTS_DIR]:
@@ -91,6 +105,107 @@ def write_json(path: Path, value) -> None:
 
 def read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def require_current_state_metadata(
+    metadata_path: Path,
+    state_file: Path,
+    model_key: str,
+    calib_seed: int,
+    variant: str,
+) -> dict:
+    if not metadata_path.exists():
+        raise RuntimeError(f"State exists without metadata: {state_file}")
+    record = read_json(metadata_path)
+    if (
+        record.get("protocol_version") != PROTOCOL_VERSION
+        or record.get("model_key") != model_key
+        or int(record.get("calibration_seed", -1)) != calib_seed
+        or record.get("variant") != variant
+        or record.get("model_snapshot") != model_provenance(model_key)
+        or record.get("dataset_snapshot") != dataset_provenance()
+        or int(record.get("bytes", -1)) != state_file.stat().st_size
+    ):
+        raise RuntimeError(
+            f"State metadata/provenance mismatch; do not reuse or mix it: {state_file}"
+        )
+    return record
+
+
+def dataset_provenance() -> dict:
+    if not DATASET_MANIFEST_PATH.exists():
+        raise RuntimeError(
+            "Missing frozen dataset manifest; run "
+            "experiments/revision_full/download_core_datasets.py first"
+        )
+    manifest = read_json(DATASET_MANIFEST_PATH)
+    if manifest.get("schema_version") != 2:
+        raise RuntimeError(f"Unsupported dataset manifest: {DATASET_MANIFEST_PATH}")
+    snapshot_hash = dataset_snapshot_sha256(manifest)
+    if manifest.get("snapshot_sha256") != snapshot_hash:
+        raise RuntimeError(f"Dataset snapshot identity is invalid: {DATASET_MANIFEST_PATH}")
+    return {
+        "manifest": str(DATASET_MANIFEST_PATH.relative_to(OUT.parent)),
+        "manifest_sha256": snapshot_hash,
+    }
+
+
+def model_provenance(model_key: str) -> dict:
+    path = OUT / "model_snapshot_manifest.json"
+    if not path.exists():
+        raise RuntimeError(
+            "Missing model snapshot manifest; run download_models.py on the server first"
+        )
+    record = read_json(path).get("models", {}).get(model_key)
+    if not record or len(str(record.get("resolved_revision", ""))) != 40:
+        raise RuntimeError(f"Missing immutable checkpoint revision for {model_key}")
+    if not record.get("weight_file_records"):
+        raise RuntimeError(
+            f"Model manifest for {model_key} lacks file hashes; rerun download_models.py"
+        )
+    return stable_model_record(record)
+
+
+def frozen_core_cache_path(dataset_key: str, filename: str) -> Path:
+    manifest = read_json(DATASET_MANIFEST_PATH)
+    records = manifest.get("core", {}).get(dataset_key, {}).get("cache_files", [])
+    matches = [
+        Path(record["path"])
+        for record in records
+        if Path(record["path"]).name == filename
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"Frozen dataset manifest must contain exactly one {filename} for {dataset_key}"
+        )
+    path = matches[0]
+    if not path.exists():
+        raise FileNotFoundError(f"Frozen dataset cache is missing: {path}")
+    return path
+
+
+def frozen_arrow_rows(dataset_key: str, filename: str) -> list[dict]:
+    import pyarrow.ipc as pa_ipc
+
+    path = frozen_core_cache_path(dataset_key, filename)
+    with pa_ipc.open_stream(str(path)) as reader:
+        return reader.read_all().to_pylist()
+
+
+def frozen_wikitext_calibration(tokenizer, calib_seed: int):
+    from ptq.data import _packed_random_segments
+
+    rows = frozen_arrow_rows(
+        "wikitext/wikitext-2-raw-v1/train", "wikitext-train.arrow"
+    )
+    texts = [row["text"] for row in rows if row.get("text") and row["text"].strip()]
+    return _packed_random_segments(
+        tokenizer,
+        texts,
+        n_samples=CALIB_SAMPLES,
+        max_length=CALIB_LENGTH,
+        seed=calib_seed,
+    )
 
 
 def append_jsonl(path: Path, row: dict) -> None:
@@ -114,15 +229,18 @@ def status(stage: str, **extra) -> None:
         **extra,
     }
     print("[status]", json.dumps(payload, ensure_ascii=False), flush=True)
-    write_json(OUT / "status.json", payload)
+    suffix = f"__{extra['model']}" if extra.get("model") in MODEL_SPECS else ""
+    write_json(OUT / f"status{suffix}.json", payload)
 
 
 def get_dataset():
-    import experiments.fix_gsm8k_500.direct_eval as direct
-
-    direct.OUT = OUT / "dataset_io"
-    direct.OUT.mkdir(parents=True, exist_ok=True)
-    return direct.get_dataset()
+    train = frozen_arrow_rows(
+        "openai/gsm8k/main/train", "gsm8k-train.arrow"
+    )
+    test = frozen_arrow_rows(
+        "openai/gsm8k/main/test", "gsm8k-test.arrow"
+    )
+    return train, test
 
 
 def prepare_protocol(force: bool = False) -> dict:
@@ -130,28 +248,33 @@ def prepare_protocol(force: bool = False) -> dict:
         lock = read_json(LOCK_PATH)
         if lock.get("protocol_version") != PROTOCOL_VERSION:
             raise RuntimeError(f"Existing lock uses another protocol: {LOCK_PATH}")
-        return lock
+        return require_protocol()
 
+    data_provenance = dataset_provenance()
     train, test = get_dataset()
     if len(test) != GSM8K_TEST_SIZE:
         raise RuntimeError(
             f"Expected {GSM8K_TEST_SIZE} GSM8K test examples, found {len(test)}"
         )
     splits = make_disjoint_screen_splits(len(train))
+    for split, calibration_seed in zip(splits, SCREEN_CALIB_SEEDS):
+        split["calibration_seed"] = calibration_seed
     full_test_indices = list(range(len(test)))
     causal_patch_indices = fixed_causal_patch_indices(len(test))
     lock = {
         "protocol_version": PROTOCOL_VERSION,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "dataset": "openai/gsm8k/main",
+        "dataset_snapshot": data_provenance,
         "train_size": len(train),
         "test_size": len(test),
         "development_split": "train only",
         "screen_splits": splits,
         "screen_quantizer": {
-            "method": "RTN-W4",
-            "scheme": "group-wise asymmetric per-output-channel min-max",
+            "method": "GPTQ-W4",
+            "scheme": "group-wise asymmetric GPTQ using the split-locked WikiText calibration seed",
             "group_size": GROUP_SIZE,
+            "calibration_seeds": list(SCREEN_CALIB_SEEDS),
         },
         "final_test": {
             "selection": "all official test examples in dataset order",
@@ -192,24 +315,20 @@ def prepare_protocol(force: bool = False) -> dict:
             *ROLE_PRIORITY_VARIANTS,
             "hessian_diag_matched",
         ],
-        "broad_tasks": [
-            "arc_challenge",
-            "hellaswag",
-            "mmlu",
-            "mmlu_high_school_mathematics",
-        ],
-        "generative_transfer_tasks": [
-            "svamp",
-            "asdiv",
-            "hendrycks_math500",
-            "truthfulqa_gen",
-        ],
+        "broad_tasks": list(BROAD_TASKS),
+        "generative_transfer_tasks": list(EXTRA_TASKS),
         "required_external_matched_budget_baselines": {
             "models": ["qwen05", "qwen15"],
             "methods": ["tacq", "hawq_v2"],
             "canonical_test_n": GSM8K_TEST_SIZE,
         },
         "canonical_gsm8k_evaluator": "direct 5-shot greedy, complete official test set",
+        "execution": {
+            "eval_batch_size_per_gpu": DEFAULT_EVAL_BATCH_SIZE,
+            "format_batch_size_per_gpu": DEFAULT_FORMAT_BATCH_SIZE,
+            "max_new_tokens": MAX_NEW_TOKENS,
+            "deterministic_greedy": True,
+        },
         "models": {
             key: {
                 "name": spec["name"],
@@ -217,6 +336,9 @@ def prepare_protocol(force: bool = False) -> dict:
                 "role": spec["role"],
             }
             for key, spec in MODEL_SPECS.items()
+        },
+        "model_snapshots": {
+            key: model_provenance(key) for key in MODEL_SPECS
         },
     }
     write_json(LOCK_PATH, lock)
@@ -235,7 +357,42 @@ def require_protocol() -> dict:
         )
     if lock.get("final_test", {}).get("n") != GSM8K_TEST_SIZE:
         raise RuntimeError("Protocol lock does not specify the complete GSM8K test set")
+    current_models = {key: model_provenance(key) for key in MODEL_SPECS}
+    if lock.get("model_snapshots") != current_models:
+        raise RuntimeError(
+            "Model snapshot manifest changed after protocol lock; rerun prepare --force "
+            "before GPU work and never mix existing results from another checkpoint"
+        )
+    current_data = dataset_provenance()
+    if lock.get("dataset_snapshot", {}).get("manifest_sha256") != current_data[
+        "manifest_sha256"
+    ]:
+        raise RuntimeError(
+            "Dataset manifest changed after protocol lock; rerun prepare --force before GPU work"
+        )
+    expected_execution = {
+        "eval_batch_size_per_gpu": DEFAULT_EVAL_BATCH_SIZE,
+        "format_batch_size_per_gpu": DEFAULT_FORMAT_BATCH_SIZE,
+        "max_new_tokens": MAX_NEW_TOKENS,
+        "deterministic_greedy": True,
+    }
+    if lock.get("execution") != expected_execution:
+        raise RuntimeError(
+            "Execution batch/token settings differ from the protocol lock; "
+            "do not resume into an existing result set with new settings"
+        )
     return lock
+
+
+def require_locked_batch(batch_size: int, *, format_control: bool = False) -> None:
+    lock = require_protocol()
+    key = "format_batch_size_per_gpu" if format_control else "eval_batch_size_per_gpu"
+    expected = int(lock["execution"][key])
+    if batch_size != expected:
+        raise RuntimeError(
+            f"batch_size={batch_size} differs from locked {key}={expected}; "
+            "change it only before formal outputs and rerun prepare --force"
+        )
 
 
 def configure_determinism(seed: int) -> None:
@@ -314,8 +471,86 @@ def screen_file(model_key: str, split_id: int) -> Path:
     return SCREEN_DIR / model_key / f"split_{split_id}.jsonl"
 
 
+def screen_state_variant(split_id: int) -> str:
+    return f"screen_gptq_w4_split{split_id}"
+
+
+def build_screen_bank(
+    model_key: str, split_id: int, calib_seed: int, force: bool
+) -> Path:
+    """Build the calibration-specific GPTQ-W4 state used by one screen run."""
+    from ptq.eval import cleanup_gpu
+    from ptq.quant.gptq import quantize_model_gptq
+
+    lock = require_protocol()
+    split = lock["screen_splits"][split_id]
+    if int(split["calibration_seed"]) != calib_seed:
+        raise RuntimeError(
+            f"screen split {split_id} is locked to calibration seed "
+            f"{split['calibration_seed']}, not {calib_seed}"
+        )
+    variant = screen_state_variant(split_id)
+    path = state_path(model_key, calib_seed, variant)
+    metadata_path = state_metadata_path(model_key, calib_seed, variant)
+    if path.exists() and not force:
+        require_current_state_metadata(
+            metadata_path, path, model_key, calib_seed, variant
+        )
+        return path
+
+    configure_determinism(calib_seed)
+    model, tokenizer = load_model_tokenizer(model_key)
+    calibration = frozen_wikitext_calibration(tokenizer, calib_seed)
+    state = quantize_model_gptq(
+        model, calibration, bits=4, group_size=GROUP_SIZE
+    )
+    save_torch_atomic(state, path)
+    screened_layers = sorted(
+        {
+            int(row["layer"])
+            for row in module_rows(model)
+        }
+    )
+    write_json(
+        metadata_path,
+        {
+            "protocol_version": PROTOCOL_VERSION,
+            "model_key": model_key,
+            "variant": variant,
+            "split_id": split_id,
+            "screen_seed": int(split["seed"]),
+            "calibration_seed": calib_seed,
+            "quantizer": "GPTQ-W4",
+            "group_size": GROUP_SIZE,
+            "calibration_samples": CALIB_SAMPLES,
+            "calibration_length": CALIB_LENGTH,
+            "screened_layers": screened_layers,
+            "state_entries": len(state),
+            "bytes": path.stat().st_size,
+            "model_snapshot": model_provenance(model_key),
+            "dataset_snapshot": dataset_provenance(),
+        },
+    )
+    del state, calibration, model, tokenizer
+    cleanup_gpu()
+    status(
+        "screen_bank_saved",
+        model=model_key,
+        split_id=split_id,
+        calib_seed=calib_seed,
+        path=str(path),
+    )
+    return path
+
+
 def _screen_records(path: Path) -> dict:
-    return {(row["type"], row.get("layer")): row for row in read_jsonl(path)}
+    records = {}
+    for row in read_jsonl(path):
+        key = (row["type"], row.get("layer"))
+        if key in records:
+            raise RuntimeError(f"Duplicate screen row {key} in {path}")
+        records[key] = row
+    return records
 
 
 def _eval_loaded_model(
@@ -380,14 +615,58 @@ def screen_model(
 ) -> None:
     import torch
     from ptq.eval import cleanup_gpu
-    from ptq.quant.rtn import dequantize_tensor_rtn, quantize_tensor_rtn
+    from ptq.quant.gptq import dequantize_gptq
 
+    require_locked_batch(batch_size)
+    if max_new_tokens != MAX_NEW_TOKENS:
+        raise RuntimeError(
+            f"screen max_new_tokens={max_new_tokens} differs from locked {MAX_NEW_TOKENS}"
+        )
     lock = require_protocol()
     split = lock["screen_splits"][split_id]
+    calib_seed = int(split["calibration_seed"])
+    variant = screen_state_variant(split_id)
+    quantized_path = state_path(model_key, calib_seed, variant)
+    if not quantized_path.exists():
+        raise FileNotFoundError(
+            f"Run build-screen-bank for {model_key}/split {split_id} first: {quantized_path}"
+        )
+    require_current_state_metadata(
+        state_metadata_path(model_key, calib_seed, variant),
+        quantized_path,
+        model_key,
+        calib_seed,
+        variant,
+    )
+    quantized_state = torch.load(
+        quantized_path, map_location="cpu", weights_only=False, mmap=True
+    )
     path = screen_file(model_key, split_id)
     if force and path.exists():
         path.unlink()
     records = _screen_records(path)
+    screen_identity = {
+        "protocol_version": PROTOCOL_VERSION,
+        "model_key": model_key,
+        "split_id": split_id,
+        "split_seed": int(split["seed"]),
+        "split_indices_sha256": split["indices_sha256"],
+        "calibration_seed": calib_seed,
+        "dataset_manifest_sha256": dataset_provenance()["manifest_sha256"],
+        "model_revision": model_provenance(model_key)["resolved_revision"],
+        "eval_batch_size_per_gpu": batch_size,
+        "max_new_tokens": max_new_tokens,
+        "quantizer": "GPTQ-W4",
+        "group_size": GROUP_SIZE,
+    }
+    if any(
+        any(row.get(key) != value for key, value in screen_identity.items())
+        for row in records.values()
+    ):
+        raise RuntimeError(
+            f"Existing screen rows have stale model/data/batch provenance: {path}. "
+            "Inspect them or rerun this split with --force."
+        )
     train, _ = get_dataset()
     examples = [train[index] for index in split["indices"]]
     configure_determinism(split["seed"])
@@ -402,9 +681,7 @@ def screen_model(
             path,
             {
                 "type": "baseline",
-                "model_key": model_key,
-                "split_id": split_id,
-                "split_seed": split["seed"],
+                **screen_identity,
                 **baseline,
             },
         )
@@ -424,11 +701,14 @@ def screen_model(
         )
         saved = [(module, module.weight.detach().cpu().clone()) for _, module in specs]
         try:
-            for _, module in specs:
-                w_q, scale, zero = quantize_tensor_rtn(
-                    module.weight.data, bits=4, group_size=GROUP_SIZE
-                )
-                dequantized = dequantize_tensor_rtn(w_q, scale, zero, GROUP_SIZE)
+            for name, module in specs:
+                if name not in quantized_state:
+                    raise RuntimeError(f"Screen GPTQ state lacks module {name}")
+                entry = quantized_state[name]
+                w_q = entry["w_q"].to(module.weight.device)
+                scale = entry["scale"].to(module.weight.device)
+                zero = entry["zero"].to(module.weight.device)
+                dequantized = dequantize_gptq(w_q, scale, zero, GROUP_SIZE)
                 module.weight.data.copy_(dequantized.to(module.weight.dtype))
                 del w_q, scale, zero, dequantized
             result = _eval_loaded_model(
@@ -438,12 +718,8 @@ def screen_model(
                 path,
                 {
                     "type": "layer",
-                    "model_key": model_key,
-                    "split_id": split_id,
-                    "split_seed": split["seed"],
+                    **screen_identity,
                     "layer": layer,
-                    "quantizer": "RTN-W4",
-                    "group_size": GROUP_SIZE,
                     "drop_vs_fp16": float(baseline["accuracy"]) - result["accuracy"],
                     **result,
                 },
@@ -455,7 +731,7 @@ def screen_model(
             gc.collect()
             torch.cuda.empty_cache()
 
-    del model, tokenizer
+    del model, tokenizer, quantized_state
     cleanup_gpu()
     status("screen_complete", model=model_key, split_id=split_id, path=str(path))
 
@@ -465,8 +741,55 @@ def select_model(model_key: str) -> dict:
     split_rows: dict[int, list[dict]] = {}
     for split in lock["screen_splits"]:
         path = screen_file(model_key, split["split_id"])
-        rows = [row for row in read_jsonl(path) if row["type"] == "layer"]
-        if not rows:
+        all_rows = read_jsonl(path)
+        baselines = [row for row in all_rows if row.get("type") == "baseline"]
+        rows = [row for row in all_rows if row.get("type") == "layer"]
+        metadata = read_json(
+            state_metadata_path(
+                model_key,
+                int(split["calibration_seed"]),
+                screen_state_variant(int(split["split_id"])),
+            )
+        )
+        current_dataset = dataset_provenance()
+        current_model = model_provenance(model_key)
+        if (
+            metadata.get("protocol_version") != PROTOCOL_VERSION
+            or metadata.get("dataset_snapshot") != current_dataset
+            or metadata.get("model_snapshot") != current_model
+            or int(metadata.get("split_id", -1)) != int(split["split_id"])
+            or int(metadata.get("calibration_seed", -1))
+            != int(split["calibration_seed"])
+        ):
+            raise RuntimeError(f"Screen-state metadata is stale: {path}")
+        expected_layers = {int(value) for value in metadata.get("screened_layers", [])}
+        observed_layers = [int(row["layer"]) for row in rows]
+        valid_common = lambda row: (
+            row.get("protocol_version") == PROTOCOL_VERSION
+            and row.get("model_key") == model_key
+            and int(row.get("split_id", -1)) == int(split["split_id"])
+            and int(row.get("split_seed", -1)) == int(split["seed"])
+            and row.get("split_indices_sha256") == split["indices_sha256"]
+            and int(row.get("calibration_seed", -1))
+            == int(split["calibration_seed"])
+            and row.get("dataset_manifest_sha256")
+            == current_dataset["manifest_sha256"]
+            and row.get("model_revision") == current_model["resolved_revision"]
+            and int(row.get("eval_batch_size_per_gpu", -1))
+            == DEFAULT_EVAL_BATCH_SIZE
+            and int(row.get("max_new_tokens", -1)) == MAX_NEW_TOKENS
+            and row.get("quantizer") == "GPTQ-W4"
+            and int(row.get("group_size", -1)) == GROUP_SIZE
+        )
+        if (
+            len(baselines) != 1
+            or not expected_layers
+            or len(observed_layers) != len(set(observed_layers))
+            or set(observed_layers) != expected_layers
+            or len(all_rows) != len(rows) + 1
+            or not valid_common(baselines[0])
+            or any(not valid_common(row) for row in rows)
+        ):
             raise RuntimeError(f"Missing completed screen: {path}")
         split_rows[int(split["split_id"])] = rows
 
@@ -508,6 +831,14 @@ def select_model(model_key: str) -> dict:
     modules = module_rows(model)
     selection = select_layers_under_budget(ranking, modules, TARGET_AVG_BITS)
     selected = set(selection["selected_layers"])
+    random_layer_allocations = make_unique_random_layer_allocations(
+        modules,
+        set(selection["w8_module_names"]),
+        selection["selected_layers"],
+    )
+    random_module_allocations = make_unique_random_module_allocations(
+        modules, set(selection["w8_module_names"])
+    )
     top_sets = []
     for split_id in split_rows:
         ordered = sorted(
@@ -583,6 +914,12 @@ def select_model(model_key: str) -> dict:
         "model": MODEL_SPECS[model_key]["display_name"],
         "selection_data": "GSM8K train development splits only",
         "test_data_used": False,
+        "screen_calibration_seeds": [
+            int(split["calibration_seed"]) for split in lock["screen_splits"]
+        ],
+        "screen_quantizer": lock["screen_quantizer"],
+        "model_snapshot": model_provenance(model_key),
+        "dataset_snapshot": dataset_provenance(),
         "screen_files": [
             str(screen_file(model_key, split_id).relative_to(OUT.parent))
             for split_id in split_rows
@@ -596,6 +933,15 @@ def select_model(model_key: str) -> dict:
         "top_set_jaccard_vs_aggregate": jaccards,
         "mean_top_set_jaccard": statistics.mean(jaccards),
         "selection_bootstrap": bootstrap_stability,
+        "random_allocation_manifest": {
+            "count_per_family": RANDOM_ALLOCATIONS,
+            "layer_seed": 20261001,
+            "module_seed": 20262001,
+            "layer_sets": random_layer_allocations,
+            "module_sets": random_module_allocations,
+            "layer_sets_sha256": json_sha256(random_layer_allocations),
+            "module_sets_sha256": json_sha256(random_module_allocations),
+        },
         "module_rows": modules,
         **selection,
     }
@@ -617,8 +963,26 @@ def selection_for(model_key: str) -> dict:
     if not path.exists():
         raise RuntimeError(f"Run `select --model {model_key}` first")
     selection = read_json(path)
+    if selection.get("protocol_version") != PROTOCOL_VERSION:
+        raise RuntimeError(f"Selection protocol is stale: {path}")
     if selection.get("test_data_used") is not False:
         raise RuntimeError(f"Selection is not test-clean: {path}")
+    if selection.get("dataset_snapshot") != dataset_provenance():
+        raise RuntimeError(f"Selection dataset provenance has changed: {path}")
+    if selection.get("model_snapshot") != model_provenance(model_key):
+        raise RuntimeError(f"Selection model provenance has changed: {path}")
+    manifest = selection.get("random_allocation_manifest", {})
+    layer_sets = manifest.get("layer_sets", [])
+    module_sets = manifest.get("module_sets", [])
+    if (
+        len(layer_sets) != RANDOM_ALLOCATIONS
+        or len({tuple(row) for row in layer_sets}) != RANDOM_ALLOCATIONS
+        or manifest.get("layer_sets_sha256") != json_sha256(layer_sets)
+        or len(module_sets) != RANDOM_ALLOCATIONS
+        or len({tuple(row) for row in module_sets}) != RANDOM_ALLOCATIONS
+        or manifest.get("module_sets_sha256") != json_sha256(module_sets)
+    ):
+        raise RuntimeError(f"Selection random-allocation manifest is invalid: {path}")
     return selection
 
 
@@ -632,7 +996,6 @@ def save_torch_atomic(value, path: Path) -> None:
 
 
 def build_bank(model_key: str, calib_seed: int, force: bool) -> Path:
-    from ptq.data import get_calib_dataset
     from ptq.eval import cleanup_gpu
     from ptq.quant.mixed_precision import quantize_model_precision_bank
 
@@ -640,10 +1003,9 @@ def build_bank(model_key: str, calib_seed: int, force: bool) -> Path:
     path = state_path(model_key, calib_seed, "precision_bank")
     metadata_path = state_metadata_path(model_key, calib_seed, "precision_bank")
     if path.exists() and not force:
-        if not metadata_path.exists():
-            raise RuntimeError(
-                f"Precision bank exists without metadata; rerun build-bank --force: {path}"
-            )
+        require_current_state_metadata(
+            metadata_path, path, model_key, calib_seed, "precision_bank"
+        )
         return path
     if not force and bank_consumers_complete(model_key, calib_seed):
         status(
@@ -655,13 +1017,7 @@ def build_bank(model_key: str, calib_seed: int, force: bool) -> Path:
         return path
     configure_determinism(calib_seed)
     model, tokenizer = load_model_tokenizer(model_key)
-    calibration = get_calib_dataset(
-        tokenizer,
-        n_samples=CALIB_SAMPLES,
-        max_length=CALIB_LENGTH,
-        dataset_name="wikitext",
-        seed=calib_seed,
-    )
+    calibration = frozen_wikitext_calibration(tokenizer, calib_seed)
     bank = quantize_model_precision_bank(
         model,
         calibration,
@@ -676,6 +1032,7 @@ def build_bank(model_key: str, calib_seed: int, force: bool) -> Path:
         {
             "protocol_version": PROTOCOL_VERSION,
             "model_key": model_key,
+            "variant": "precision_bank",
             "calibration_dataset": "wikitext train",
             "calibration_seed": calib_seed,
             "calibration_samples": CALIB_SAMPLES,
@@ -688,6 +1045,8 @@ def build_bank(model_key: str, calib_seed: int, force: bool) -> Path:
             "modules": len(bank),
             "selection_score": "calibration-weighted diagonal-Hessian reconstruction NMSE",
             "bytes": path.stat().st_size,
+            "model_snapshot": model_provenance(model_key),
+            "dataset_snapshot": dataset_provenance(),
         },
     )
     del bank, calibration, model, tokenizer
@@ -697,29 +1056,11 @@ def build_bank(model_key: str, calib_seed: int, force: bool) -> Path:
 
 
 def _random_module_allocation(selection: dict, allocation_id: int) -> set[str]:
-    rows = selection["module_rows"]
-    target_names = set(selection["w8_module_names"])
-    target_params = sum(int(row["n_params"]) for row in rows if row["name"] in target_names)
-    best_names: set[str] = set()
-    best_gap = target_params
-    candidates = list(rows)
-    rng = random.Random(20262001 + allocation_id)
-    for _ in range(5000):
-        rng.shuffle(candidates)
-        chosen = set()
-        total = 0
-        for row in candidates:
-            size = int(row["n_params"])
-            if total + size <= target_params:
-                chosen.add(row["name"])
-                total += size
-        gap = target_params - total
-        if gap < best_gap:
-            best_names = chosen
-            best_gap = gap
-            if gap == 0:
-                break
-    return best_names
+    manifest = selection.get("random_allocation_manifest", {})
+    allocations = manifest.get("module_sets", [])
+    if len(allocations) != RANDOM_ALLOCATIONS:
+        raise RuntimeError("Selection lacks the preregistered random-module manifest")
+    return set(allocations[allocation_id])
 
 
 def _policy_for_variant(
@@ -753,9 +1094,12 @@ def _policy_for_variant(
         selected = set()
     elif variant.startswith("random_"):
         allocation_id = int(variant.split("_", 1)[1])
-        all_layers = sorted({int(row["layer"]) for row in selection["module_rows"]})
-        rng = random.Random(20261001 + allocation_id)
-        selected = set(rng.sample(all_layers, len(selected)))
+        allocations = selection.get("random_allocation_manifest", {}).get(
+            "layer_sets", []
+        )
+        if len(allocations) != RANDOM_ALLOCATIONS:
+            raise RuntimeError("Selection lacks the preregistered random-layer manifest")
+        selected = {int(layer) for layer in allocations[allocation_id]}
 
     def policy(module_idx: int, name: str, short: str) -> str:
         if short not in ELIGIBLE_SHORT_NAMES:
@@ -810,10 +1154,9 @@ def materialize(model_key: str, calib_seed: int, variant: str, force: bool) -> P
     output_path = state_path(model_key, calib_seed, variant)
     metadata_path = state_metadata_path(model_key, calib_seed, variant)
     if output_path.exists() and not force:
-        if not metadata_path.exists():
-            raise RuntimeError(
-                f"State exists without metadata; rerun materialize --force: {output_path}"
-            )
+        require_current_state_metadata(
+            metadata_path, output_path, model_key, calib_seed, variant
+        )
         return output_path
     if not force and state_consumers_complete(model_key, calib_seed, variant):
         status(
@@ -827,6 +1170,13 @@ def materialize(model_key: str, calib_seed: int, variant: str, force: bool) -> P
     bank_path = state_path(model_key, calib_seed, "precision_bank")
     if not bank_path.exists():
         raise FileNotFoundError(f"Run build-bank first: {bank_path}")
+    require_current_state_metadata(
+        state_metadata_path(model_key, calib_seed, "precision_bank"),
+        bank_path,
+        model_key,
+        calib_seed,
+        "precision_bank",
+    )
     bank = torch.load(bank_path, map_location="cpu", weights_only=False, mmap=True)
     scored_allocation = None
     selected_override = None
@@ -884,6 +1234,8 @@ def materialize(model_key: str, calib_seed: int, variant: str, force: bool) -> P
             "parameter_weighted_average_bits": avg,
             "state_entries": len(state),
             "bytes": output_path.stat().st_size,
+            "model_snapshot": model_provenance(model_key),
+            "dataset_snapshot": dataset_provenance(),
         },
     )
     del state, bank
@@ -909,10 +1261,9 @@ def quantize_uniform(model_key: str, calib_seed: int, bits: int, force: bool) ->
     path = state_path(model_key, calib_seed, variant)
     metadata_path = state_metadata_path(model_key, calib_seed, variant)
     if path.exists() and not force:
-        if not metadata_path.exists():
-            raise RuntimeError(
-                f"State exists without metadata; rerun quantize-uniform --force: {path}"
-            )
+        require_current_state_metadata(
+            metadata_path, path, model_key, calib_seed, variant
+        )
         return path
     if not force and state_consumers_complete(model_key, calib_seed, variant):
         status(
@@ -926,6 +1277,13 @@ def quantize_uniform(model_key: str, calib_seed: int, bits: int, force: bool) ->
     bank_path = state_path(model_key, calib_seed, "precision_bank")
     if not bank_path.exists():
         raise FileNotFoundError(f"Run build-bank first: {bank_path}")
+    require_current_state_metadata(
+        state_metadata_path(model_key, calib_seed, "precision_bank"),
+        bank_path,
+        model_key,
+        calib_seed,
+        "precision_bank",
+    )
     bank = torch.load(bank_path, map_location="cpu", weights_only=False, mmap=True)
     action = f"w{bits}"
     state = compose_precision_state(bank, lambda *_: action)
@@ -942,6 +1300,8 @@ def quantize_uniform(model_key: str, calib_seed: int, bits: int, force: bool) ->
             "parameter_weighted_average_bits": float(bits),
             "state_entries": len(state),
             "bytes": path.stat().st_size,
+            "model_snapshot": model_provenance(model_key),
+            "dataset_snapshot": dataset_provenance(),
         },
     )
     del state, bank
@@ -964,11 +1324,18 @@ def configure_direct_eval(
 
     method = method_id(variant, calib_seed)
     spec = MODEL_SPECS[model_key]
-    direct.OUT = RESULTS_DIR
+    direct.OUT = RESULTS_DIR / "runtime" / model_key
     direct.SAMPLE_DIR = RESULTS_DIR / "samples"
     direct.LOG_DIR = RESULTS_DIR / "logs"
+    direct.get_dataset = get_dataset
     for path in [direct.OUT, direct.SAMPLE_DIR, direct.LOG_DIR]:
         path.mkdir(parents=True, exist_ok=True)
+    direct.ROW_METADATA = {
+        "protocol_version": PROTOCOL_VERSION,
+        "dataset_manifest_sha256": dataset_provenance()["manifest_sha256"],
+        "model_revision": model_provenance(model_key)["resolved_revision"],
+        "canonical_test_set": "openai/gsm8k/main:test:all-1319",
+    }
     direct.MODEL_SPECS = {
         model_key: {
             "name": spec["display_name"],
@@ -984,6 +1351,13 @@ def configure_direct_eval(
         path = state_path(model_key, calib_seed, variant)
         if not path.exists():
             raise FileNotFoundError(path)
+        require_current_state_metadata(
+            state_metadata_path(model_key, calib_seed, variant),
+            path,
+            model_key,
+            calib_seed,
+            variant,
+        )
         kind = "gptq" if variant in {"gptq_w5", "gptq_w6"} else "mixed"
         direct.METHOD_SPECS = {
             method: {
@@ -1005,8 +1379,28 @@ def evaluate_full(
     max_new_tokens: int,
     force: bool,
 ) -> None:
-    require_protocol()
+    require_locked_batch(batch_size)
+    if max_new_tokens != MAX_NEW_TOKENS:
+        raise RuntimeError(
+            f"max_new_tokens={max_new_tokens} differs from locked {MAX_NEW_TOKENS}"
+        )
     if not force and gsm8k_complete(model_key, variant, calib_seed):
+        completed_path = gsm8k_sample_path(model_key, variant, calib_seed)
+        expected_row_metadata = {
+            "protocol_version": PROTOCOL_VERSION,
+            "dataset_manifest_sha256": dataset_provenance()["manifest_sha256"],
+            "model_revision": model_provenance(model_key)["resolved_revision"],
+            "canonical_test_set": "openai/gsm8k/main:test:all-1319",
+            "eval_batch_size_per_gpu": batch_size,
+            "max_new_tokens": max_new_tokens,
+        }
+        if any(
+            any(row.get(key) != value for key, value in expected_row_metadata.items())
+            for row in read_jsonl(completed_path)
+        ):
+            raise RuntimeError(
+                f"Completed canonical result has stale provenance: {completed_path}"
+            )
         status(
             "full_evaluation_already_complete",
             model=model_key,
@@ -1035,18 +1429,33 @@ def evaluate_allocation(
     if not (variant.startswith("random_") or variant.startswith("random_modules_")):
         raise ValueError("evaluate-allocation only accepts random_* or random_modules_* variants")
     completed = gsm8k_complete(model_key, variant, calib_seed)
-    if completed and not keep_state:
-        cleanup_state_artifact(model_key, calib_seed, variant)
-        return
-    materialize(model_key, calib_seed, variant, force=completed and keep_state)
     if completed:
+        evaluate_full(
+            model_key,
+            variant,
+            calib_seed,
+            batch_size,
+            max_new_tokens=MAX_NEW_TOKENS,
+            force=False,
+        )
+        if keep_state:
+            allocation_state = state_path(model_key, calib_seed, variant)
+            materialize(
+                model_key,
+                calib_seed,
+                variant,
+                force=not allocation_state.exists(),
+            )
+        else:
+            cleanup_state_artifact(model_key, calib_seed, variant)
         return
+    materialize(model_key, calib_seed, variant, force=False)
     evaluate_full(
         model_key,
         variant,
         calib_seed,
         batch_size,
-        max_new_tokens=256,
+        max_new_tokens=MAX_NEW_TOKENS,
         force=False,
     )
     if not gsm8k_complete(model_key, variant, calib_seed):
@@ -1066,8 +1475,25 @@ def evaluate_broad(
 ) -> None:
     from ptq.eval import cleanup_gpu, run_eval_on_model
 
-    require_protocol()
+    require_locked_batch(batch_size)
+    expected_method = method_id(variant, calib_seed)
+    expected_path = RESULTS_DIR / "broad" / f"{model_key}__{expected_method}.json"
+    expected_metadata = {
+        "protocol_version": PROTOCOL_VERSION,
+        "model_key": model_key,
+        "method": expected_method,
+        "dataset_snapshot": dataset_provenance(),
+        "model_snapshot": model_provenance(model_key),
+        "batch_size_per_gpu": batch_size,
+        "max_new_tokens": MAX_NEW_TOKENS,
+        "tasks": list(BROAD_TASKS),
+    }
     if not force and broad_complete(model_key, variant, calib_seed):
+        record = read_json(expected_path)
+        if any(record.get(key) != value for key, value in expected_metadata.items()):
+            raise RuntimeError(
+                f"Completed broad result has stale provenance: {expected_path}"
+            )
         status(
             "broad_evaluation_already_complete",
             model=model_key,
@@ -1080,20 +1506,18 @@ def evaluate_broad(
     path = RESULTS_DIR / "broad" / f"{model_key}__{method}.json"
     if force and path.exists():
         path.unlink()
-    tasks = [
-        "arc_challenge",
-        "hellaswag",
-        "mmlu",
-        "mmlu_high_school_mathematics",
-    ]
+    tasks = list(BROAD_TASKS)
+    locked_metadata = expected_metadata
     record = read_json(path) if path.exists() else {
-        "protocol_version": PROTOCOL_VERSION,
-        "model_key": model_key,
-        "method": method,
+        **locked_metadata,
         "canonical_gsm8k_source": "evaluate-full only; GSM8K intentionally excluded here",
         "limits": {task: None for task in tasks},
         "scores": {},
     }
+    if any(record.get(key) != value for key, value in locked_metadata.items()):
+        raise RuntimeError(
+            f"Broad result metadata changed; inspect or rerun with --force: {path}"
+        )
     for task in tasks:
         if task in record["scores"]:
             continue
@@ -1102,7 +1526,7 @@ def evaluate_broad(
             tokenizer,
             [task],
             batch_size=batch_size,
-            max_gen_toks=256,
+            max_gen_toks=MAX_NEW_TOKENS,
             limit=None,
         )
         record["scores"].update(score)
@@ -1125,8 +1549,25 @@ def evaluate_extra(
     from lm_eval.tasks import TaskManager
     from ptq.eval import cleanup_gpu
 
-    require_protocol()
+    require_locked_batch(batch_size)
+    expected_method = method_id(variant, calib_seed)
+    expected_path = RESULTS_DIR / "extra" / f"{model_key}__{expected_method}.json"
+    expected_metadata = {
+        "protocol_version": PROTOCOL_VERSION,
+        "model_key": model_key,
+        "method": expected_method,
+        "dataset_snapshot": dataset_provenance(),
+        "model_snapshot": model_provenance(model_key),
+        "batch_size_per_gpu": batch_size,
+        "max_new_tokens": MAX_NEW_TOKENS,
+        "tasks": list(EXTRA_TASKS),
+    }
     if not force and extra_complete(model_key, variant, calib_seed):
+        record = read_json(expected_path)
+        if any(record.get(key) != value for key, value in expected_metadata.items()):
+            raise RuntimeError(
+                f"Completed extra-panel result has stale provenance: {expected_path}"
+            )
         status(
             "extra_evaluation_already_complete",
             model=model_key,
@@ -1142,20 +1583,23 @@ def evaluate_extra(
         batch_size=batch_size,
         max_batch_size=batch_size,
     )
-    tasks = ["svamp", "asdiv", "hendrycks_math500", "truthfulqa_gen"]
+    tasks = list(EXTRA_TASKS)
     task_manager = TaskManager(
         include_path=str(OUT.parents[1] / "fix_svamp_ood")
     )
     path = RESULTS_DIR / "extra" / f"{model_key}__{method}.json"
     if force and path.exists():
         path.unlink()
+    locked_metadata = expected_metadata
     record = read_json(path) if path.exists() else {
-        "protocol_version": PROTOCOL_VERSION,
-        "model_key": model_key,
-        "method": method,
+        **locked_metadata,
         "limits": {task: None for task in tasks},
         "results": {},
     }
+    if any(record.get(key) != value for key, value in locked_metadata.items()):
+        raise RuntimeError(
+            f"Extra-panel metadata changed; inspect or rerun with --force: {path}"
+        )
     for task in tasks:
         if task in record["results"]:
             continue
@@ -1168,7 +1612,7 @@ def evaluate_extra(
             log_samples=True,
             gen_kwargs={
                 "temperature": 0.0,
-                "max_new_tokens": 256,
+                "max_new_tokens": MAX_NEW_TOKENS,
                 "do_sample": False,
             },
         )
@@ -1195,6 +1639,81 @@ def parse_model(value: str) -> str:
     return value
 
 
+def smoke_eval(
+    model_key: str,
+    batch_size: int,
+    format_batch_size: int,
+    max_new_tokens: int,
+) -> dict:
+    """Use GSM8K train only to validate 24-GiB evaluation memory before locking."""
+    import torch
+    from experiments.fix_gsm8k_500.direct_eval import gold_answer
+    from experiments.revision_full.format_control import (
+        chat_prompt,
+        make_item,
+        raw_prompt,
+        score_choice_batch,
+    )
+    from ptq.eval import cleanup_gpu
+
+    if batch_size <= 0 or format_batch_size <= 0 or max_new_tokens <= 0:
+        raise ValueError("smoke-test batch sizes and max_new_tokens must be positive")
+    dataset_provenance()
+    model_provenance(model_key)
+    train, _ = get_dataset()
+    generation_examples = [train[index] for index in range(5, 5 + batch_size)]
+    configure_determinism(20260901)
+    torch.cuda.reset_peak_memory_stats()
+    model, tokenizer = load_model_tokenizer(model_key)
+    generation = _eval_loaded_model(
+        model_key,
+        model,
+        tokenizer,
+        generation_examples,
+        batch_size,
+        max_new_tokens,
+    )
+
+    train_answers = [gold_answer(row["answer"]) for row in train[5:]]
+    demos = [
+        make_item(row["question"], row["answer"], train_answers, 20260831 + index)
+        for index, row in enumerate(train[:5])
+    ]
+    targets = [
+        make_item(
+            train[index]["question"],
+            train[index]["answer"],
+            train_answers,
+            20261831 + index,
+        )
+        for index in range(5, 5 + format_batch_size)
+    ]
+    prompts = [
+        chat_prompt(tokenizer, demos, item)
+        if MODEL_SPECS[model_key]["prompt_style"] == "chat"
+        else raw_prompt(demos, item)
+        for item in targets
+    ]
+    scores = score_choice_batch(model, tokenizer, prompts)
+    if len(scores) != format_batch_size or any(len(row) != 4 for row in scores):
+        raise RuntimeError("format-control smoke test did not return four scores per item")
+    peak_gib = torch.cuda.max_memory_allocated() / 1024**3
+    result = {
+        "model_key": model_key,
+        "source_split": "GSM8K train only",
+        "generation_batch_size": batch_size,
+        "format_batch_size": format_batch_size,
+        "max_new_tokens": max_new_tokens,
+        "generation_items": generation["n"],
+        "peak_cuda_allocated_gib": round(peak_gib, 3),
+        "status": "passed",
+    }
+    del model, tokenizer
+    cleanup_gpu()
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1202,11 +1721,28 @@ def main() -> None:
     p = sub.add_parser("prepare")
     p.add_argument("--force", action="store_true")
 
+    p = sub.add_parser("smoke-eval")
+    p.add_argument("--model", required=True)
+    p.add_argument("--batch-size", type=int, default=DEFAULT_EVAL_BATCH_SIZE)
+    p.add_argument("--format-batch-size", type=int, default=DEFAULT_FORMAT_BATCH_SIZE)
+    p.add_argument("--max-new-tokens", type=int, default=MAX_NEW_TOKENS)
+
+    p = sub.add_parser("build-screen-bank")
+    p.add_argument("--model", required=True)
+    p.add_argument("--split-id", type=int, choices=range(len(SCREEN_SEEDS)), required=True)
+    p.add_argument("--calib-seed", type=int, choices=CALIB_SEEDS, required=True)
+    p.add_argument("--force", action="store_true")
+
+    p = sub.add_parser("cleanup-screen-bank")
+    p.add_argument("--model", required=True)
+    p.add_argument("--split-id", type=int, choices=range(len(SCREEN_SEEDS)), required=True)
+    p.add_argument("--calib-seed", type=int, choices=CALIB_SEEDS, required=True)
+
     p = sub.add_parser("screen")
     p.add_argument("--model", required=True)
     p.add_argument("--split-id", type=int, choices=range(len(SCREEN_SEEDS)), required=True)
     p.add_argument("--batch-size", type=int, default=DEFAULT_EVAL_BATCH_SIZE)
-    p.add_argument("--max-new-tokens", type=int, default=256)
+    p.add_argument("--max-new-tokens", type=int, default=MAX_NEW_TOKENS)
     p.add_argument("--force", action="store_true")
 
     p = sub.add_parser("select")
@@ -1272,7 +1808,22 @@ def main() -> None:
         return
 
     model_key = parse_model(args.model)
-    if args.command == "screen":
+    if args.command == "smoke-eval":
+        smoke_eval(
+            model_key,
+            args.batch_size,
+            args.format_batch_size,
+            args.max_new_tokens,
+        )
+    elif args.command == "build-screen-bank":
+        print(
+            build_screen_bank(
+                model_key, args.split_id, args.calib_seed, args.force
+            )
+        )
+    elif args.command == "cleanup-screen-bank":
+        cleanup_screen_state_artifact(model_key, args.split_id, args.calib_seed)
+    elif args.command == "screen":
         screen_model(
             model_key,
             args.split_id,
@@ -1318,7 +1869,7 @@ def main() -> None:
             args.variant,
             args.calib_seed,
             args.batch_size,
-            256,
+            MAX_NEW_TOKENS,
             args.force,
         )
     elif args.command == "evaluate-broad":

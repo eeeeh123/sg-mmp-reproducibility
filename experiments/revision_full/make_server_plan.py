@@ -6,9 +6,12 @@ sys.path.insert(0, ".")
 
 from experiments.revision_full.protocol import (
     CALIB_SEEDS,
+    DEFAULT_EVAL_BATCH_SIZE,
+    DEFAULT_FORMAT_BATCH_SIZE,
     MODEL_SPECS,
     RANDOM_ALLOCATIONS,
     RANDOM_CALIB_SEED,
+    SCREEN_CALIB_SEEDS,
     SCREEN_SEEDS,
 )
 
@@ -44,20 +47,24 @@ def state_cycle(
         )
     yield (
         "python experiments/revision_full/run.py evaluate-full "
-        f"--model {model} --variant {variant} --calib-seed {seed}"
+        f"--model {model} --variant {variant} --calib-seed {seed} "
+        f"--batch-size {DEFAULT_EVAL_BATCH_SIZE}"
     )
     if panels:
         yield (
             "python experiments/revision_full/run.py evaluate-broad "
-            f"--model {model} --variant {variant} --calib-seed {seed}"
+            f"--model {model} --variant {variant} --calib-seed {seed} "
+            f"--batch-size {DEFAULT_EVAL_BATCH_SIZE}"
         )
         yield (
             "python experiments/revision_full/run.py evaluate-extra "
-            f"--model {model} --variant {variant} --calib-seed {seed}"
+            f"--model {model} --variant {variant} --calib-seed {seed} "
+            f"--batch-size {DEFAULT_EVAL_BATCH_SIZE}"
         )
         yield (
             "python experiments/revision_full/format_control.py "
-            f"--model {model} --variant {variant} --calib-seed {seed}"
+            f"--model {model} --variant {variant} --calib-seed {seed} "
+            f"--batch-size {DEFAULT_FORMAT_BATCH_SIZE}"
         )
     if causal:
         yield (
@@ -77,16 +84,25 @@ def commands():
     yield "python experiments/revision_full/readiness.py --stage preflight"
 
     for model in MODEL_SPECS:
-        for split_id in range(len(SCREEN_SEEDS)):
+        for split_id, calib_seed in enumerate(SCREEN_CALIB_SEEDS):
+            yield (
+                "python experiments/revision_full/run.py build-screen-bank "
+                f"--model {model} --split-id {split_id} --calib-seed {calib_seed}"
+            )
             yield (
                 "python experiments/revision_full/run.py screen "
-                f"--model {model} --split-id {split_id}"
+                f"--model {model} --split-id {split_id} "
+                f"--batch-size {DEFAULT_EVAL_BATCH_SIZE}"
+            )
+            yield (
+                "python experiments/revision_full/run.py cleanup-screen-bank "
+                f"--model {model} --split-id {split_id} --calib-seed {calib_seed}"
             )
         yield f"python experiments/revision_full/run.py select --model {model}"
 
         yield (
             "python experiments/revision_full/run.py evaluate-full "
-            f"--model {model} --variant fp16"
+            f"--model {model} --variant fp16 --batch-size {DEFAULT_EVAL_BATCH_SIZE}"
         )
         for command in [
             "evaluate-broad",
@@ -94,24 +110,12 @@ def commands():
         ]:
             yield (
                 f"python experiments/revision_full/run.py {command} "
-                f"--model {model} --variant fp16"
+                f"--model {model} --variant fp16 --batch-size {DEFAULT_EVAL_BATCH_SIZE}"
             )
         yield (
             "python experiments/revision_full/format_control.py "
-            f"--model {model} --variant fp16"
+            f"--model {model} --variant fp16 --batch-size {DEFAULT_FORMAT_BATCH_SIZE}"
         )
-
-        for seed in [value for value in CALIB_SEEDS if value != RANDOM_CALIB_SEED]:
-            yield (
-                "python experiments/revision_full/run.py build-bank "
-                f"--model {model} --calib-seed {seed}"
-            )
-            for variant in ["gptq_w4", "gptq_w5", "gptq_w6", "sg_mmp"]:
-                yield from state_cycle(model, seed, variant)
-            yield (
-                "python experiments/revision_full/run.py cleanup-bank "
-                f"--model {model} --calib-seed {seed}"
-            )
 
         yield (
             "python experiments/revision_full/run.py build-bank "
@@ -126,7 +130,8 @@ def commands():
                     variant = f"{prefix}_{allocation_id}"
                     yield (
                         "python experiments/revision_full/run.py evaluate-allocation "
-                        f"--model {model} --variant {variant} --calib-seed {RANDOM_CALIB_SEED}"
+                        f"--model {model} --variant {variant} --calib-seed {RANDOM_CALIB_SEED} "
+                        f"--batch-size {DEFAULT_EVAL_BATCH_SIZE}"
                     )
 
         yield from state_cycle(
@@ -143,6 +148,18 @@ def commands():
             "python experiments/revision_full/run.py cleanup-bank "
             f"--model {model} --calib-seed {RANDOM_CALIB_SEED}"
         )
+
+        for seed in [value for value in CALIB_SEEDS if value != RANDOM_CALIB_SEED]:
+            yield (
+                "python experiments/revision_full/run.py build-bank "
+                f"--model {model} --calib-seed {seed}"
+            )
+            for variant in ["gptq_w4", "gptq_w5", "gptq_w6", "sg_mmp"]:
+                yield from state_cycle(model, seed, variant)
+            yield (
+                "python experiments/revision_full/run.py cleanup-bank "
+                f"--model {model} --calib-seed {seed}"
+            )
 
         if MODEL_SPECS[model]["role"] == "primary":
             yield (

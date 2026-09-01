@@ -20,12 +20,20 @@ sys.path.insert(0, ".")
 from experiments.fix_gsm8k_500.direct_eval import gold_answer
 from experiments.revision_full.lifecycle import format_complete
 from experiments.revision_full.protocol import (
+    DEFAULT_FORMAT_BATCH_SIZE,
     GSM8K_TEST_SIZE,
     MODEL_SPECS,
+    PROTOCOL_VERSION,
     RESULTS_DIR,
     method_id,
 )
-from experiments.revision_full.run import configure_direct_eval, get_dataset
+from experiments.revision_full.run import (
+    configure_direct_eval,
+    dataset_provenance,
+    get_dataset,
+    model_provenance,
+    require_locked_batch,
+)
 
 
 OUT = RESULTS_DIR / "format_control"
@@ -193,7 +201,15 @@ def done_ids(path: Path) -> set[int]:
 
 def prepare_manifest(force: bool = False) -> dict:
     if MANIFEST_PATH.exists() and not force:
-        return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        if (
+            manifest.get("protocol_version") != PROTOCOL_VERSION
+            or manifest.get("dataset_snapshot") != dataset_provenance()
+        ):
+            raise RuntimeError(
+                f"Stale format-control manifest; rerun with --prepare-only --force: {MANIFEST_PATH}"
+            )
+        return manifest
     train, test = get_dataset()
     if len(test) != GSM8K_TEST_SIZE:
         raise RuntimeError(f"Expected {GSM8K_TEST_SIZE} test rows, found {len(test)}")
@@ -215,6 +231,8 @@ def prepare_manifest(force: bool = False) -> dict:
         for doc_id, row in enumerate(test)
     ]
     manifest = {
+        "protocol_version": PROTOCOL_VERSION,
+        "dataset_snapshot": dataset_provenance(),
         "dataset": "openai/gsm8k/main",
         "source_split": "test",
         "n": GSM8K_TEST_SIZE,
@@ -239,15 +257,49 @@ def evaluate(
 ) -> None:
     from ptq.eval import cleanup_gpu
 
+    require_locked_batch(batch_size, format_control=True)
     method = method_id(variant, calib_seed)
     path = output_path(model_key, method)
+    expected_metadata = {
+        "protocol_version": PROTOCOL_VERSION,
+        "format_batch_size_per_gpu": batch_size,
+        "dataset_manifest_sha256": dataset_provenance()["manifest_sha256"],
+        "model_revision": model_provenance(model_key)["resolved_revision"],
+    }
     if not force and format_complete(model_key, variant, calib_seed):
+        with path.open(encoding="utf-8") as stream:
+            completed_rows = [
+                json.loads(line) for line in stream if line.strip()
+            ]
+        if any(
+            any(row.get(key) != value for key, value in expected_metadata.items())
+            for row in completed_rows
+        ):
+            raise RuntimeError(
+                f"Completed format-control result has stale provenance: {path}"
+            )
         print(f"[skip] complete format control: {path}", flush=True)
         return
     direct, method = configure_direct_eval(model_key, variant, calib_seed)
     if force and path.exists():
         path.unlink()
-    completed = done_ids(path)
+    existing_rows = []
+    if path.exists():
+        with path.open(encoding="utf-8") as stream:
+            existing_rows = [json.loads(line) for line in stream if line.strip()]
+    completed_list = [int(row["doc_id"]) for row in existing_rows]
+    if (
+        len(completed_list) != len(set(completed_list))
+        or any(index < 0 or index >= GSM8K_TEST_SIZE for index in completed_list)
+        or any(
+            any(row.get(key) != value for key, value in expected_metadata.items())
+            for row in existing_rows
+        )
+    ):
+        raise RuntimeError(
+            f"Format-control result has duplicate/invalid IDs; inspect or rerun with --force: {path}"
+        )
+    completed = set(completed_list)
     manifest = prepare_manifest()
     demos = manifest["demos"]
     model, tokenizer = direct.load_model(model_key, method)
@@ -268,6 +320,7 @@ def evaluate(
             for item, scores in zip(batch, batch_scores):
                 prediction = max(range(4), key=scores.__getitem__)
                 record = {
+                    **expected_metadata,
                     "doc_id": int(item["doc_id"]),
                     "choices": item["choices"],
                     "gold_label": item["correct_label"],
@@ -290,7 +343,7 @@ def parse_args():
     parser.add_argument("--variant")
     parser.add_argument("--calib-seed", type=int)
     parser.add_argument("--prepare-only", action="store_true")
-    parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_FORMAT_BATCH_SIZE)
     parser.add_argument("--force", action="store_true")
     return parser.parse_args()
 

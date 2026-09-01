@@ -188,7 +188,7 @@ def run_eval(model_name: str, method: str, tasks: list, batch_size: int = 4,
 
     task_scores = {}
     for task in tasks:
-        r = results["results"].get(task, {})
+        r = results["results"].get(task, {}) or results.get("groups", {}).get(task, {})
         score = None
         for metric in ["acc_norm,none", "acc,none", "exact_match,flexible-extract",
                        "exact_match,strict-match", "exact_match,none", "flexible_extract,none"]:
@@ -221,7 +221,7 @@ def run_eval_on_model(model, tokenizer, tasks: list, batch_size: int = 4,
 
     task_scores = {}
     for task in tasks:
-        r = results["results"].get(task, {})
+        r = results["results"].get(task, {}) or results.get("groups", {}).get(task, {})
         score = None
         for metric in ["acc_norm,none", "acc,none", "exact_match,flexible-extract",
                        "exact_match,strict-match", "exact_match,none", "flexible_extract,none"]:

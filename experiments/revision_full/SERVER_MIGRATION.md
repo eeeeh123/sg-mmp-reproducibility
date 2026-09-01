@@ -1,31 +1,25 @@
-# Laboratory-server migration and execution guide
+# Two-RTX-3090 server migration and execution guide
 
-## Hardware and time budget
+This guide is for `revision-full-v4`. Run commands from the repository root. Do not upload checkpoints to GitHub; download and verify them directly on the server.
 
-The resource-aware v3 command plan has 498 resumable commands. The additional 88 commands are fail-closed lifecycle checkpoints that validate evidence and remove reconstructible states; they add negligible GPU work. Its known GSM8K workload alone contains:
+## Capacity and realistic duration
 
-- 81,408 train-only generation cases for native layer screening;
-- 105,520 full-test cases across 80 FP16/core/control evaluations;
-- 237,420 full-test cases across 180 random-allocation evaluations;
-- 15,828 same-item format cases, each scoring four candidates;
-- plus 12 broad panels, 12 generative transfer panels, 12 shared precision-bank builds, and the causal diagnostic.
+The frozen plan contains 522 commands, including 100 fail-closed state/bank/screen cleanup checkpoints. The expensive work is not the cleanup:
 
-This is still a throughput problem rather than a model-capacity problem. Historical local logs show that one Qwen2.5-0.5B 300-item layer screen took 9.0 hours on the RTX 5060 Ti machine. Linear item-count scaling gives about 23.0 hours for three 256-item screens on that local machine, before the faster RTX 3090 and batch-size increase are credited. Version 3 also reduces known GSM8K generation cases from 706,244 to 424,348 (39.9%) and reduces calibration-capture model forwards from roughly 172,800 to 1,536 by sharing one capture across W4/W5/W6. A conservative initial range for one RTX 3090 is roughly 120-300 GPU-hours, or about 5-13 continuous days; this is a planning range, not a promise. Run one Qwen-0.5B screen split and one seed-41 precision-bank build first, then replace the range with measured server throughput.
+- 81,408 train-only generations for native layer screening;
+- 105,520 complete-test generations for 80 FP16/core/placement runs;
+- 237,420 complete-test generations for 180 preregistered random allocations;
+- 15,828 same-item MCQ cases, each scoring four candidates;
+- 12 broad panels, 12 generative transfer panels, 12 precision-bank builds;
+- a 200-item teacher-forced diagnostic at every Qwen-0.5B layer for block, attention, and MLP interventions.
 
-| Configuration | Feasibility | Planning wall time |
-|---|---|---|
-| 1× RTX 3090 24 GiB, 64 GiB RAM, about 100 GiB free persistent storage | Recommended plan for the available laboratory hardware | about 5-13 continuous days; calibrate with the pilot |
-| 1× RTX 3090 24 GiB, 32 GiB RAM | GPU capacity is adequate, but shared-bank construction may pressure host RAM | use a reduced in-memory capture mode only after profiling; 64 GiB RAM is safer |
-| 2× 24 GiB GPUs, 96 GiB RAM, about 150 GiB free persistent storage | Optional future acceleration | about 3-7 days if model shards run independently |
+With two 24-GiB RTX 3090 cards, the internal core is expected to take roughly 3–7 continuous days. This is a planning range, not a guarantee; actual prompt lengths, generated lengths, host RAM, shared-disk speed, and quantization kernels dominate. Use the first screen and precision-bank timings to update the estimate. Official TaCQ/HAWQ-V2 adaptation is additional work.
 
-The current state format stores int8 code tensors rather than true packed 4/5/6-bit files. Retaining every bank and materialized state would occupy about 161.6 GiB before caches and backups. The lifecycle-aware plan instead keeps one calibration bank plus at most one materialized state. The largest estimated state peak is about 9.9 GiB for Gemma; the four source model folders total about 11.9 GiB. Allow roughly 40-80 GiB for source models, the environment, data caches, persistent results, and transient state, and reserve about 100 GiB until the pilot measures the real output/cache sizes.
+For two concurrent model processes, the estimated active state peak is 17.78 GiB. On one shared filesystem the code requires about 55 GiB free and recommends about 92 GiB free. These are **free-space** values after the Python environment, four source checkpoints (about 11.9 GiB), and dataset caches exist. A 100-GiB total quota may therefore be inadequate; trust the measured preflight, not the quota label.
 
-## 1. Clone code; do not put model weights in GitHub
+Recommended minimum host: two RTX 3090 24 GiB, 64 GiB system RAM (96 GiB preferred), and at least 55 GiB actually free after staging. If only 50-something GiB is free, do not start two processes unless preflight passes. A separate scratch filesystem can hold `REVISION_FULL_STATE_DIR`, but an interrupted scratch state may need reconstruction.
 
-The GitHub repository intentionally excludes `models/`, quantized states,
-generated outputs, caches, archives, and secrets. Do not use Git LFS for the
-four checkpoints: it adds quota and clone failure modes without improving the
-experiment. Clone only the source code on the Linux server:
+## 1. Clone source and create the environment
 
 ```bash
 cd /data/$USER
@@ -37,9 +31,7 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements-server.txt
 ```
 
-The tested main environment uses PyTorch 2.11/CUDA 12.8. TaCQ and HAWQ-V2 must use isolated environments; do not install them into this one.
-
-Set caches on a large persistent disk, not a small home partition:
+Set every cache inside the allocated large filesystem:
 
 ```bash
 export HF_HOME=/data/$USER/huggingface
@@ -48,145 +40,140 @@ export HF_HUB_CACHE=$HF_HOME/hub
 mkdir -p "$HF_DATASETS_CACHE" "$HF_HUB_CACHE"
 ```
 
-Persist these exports in the job script or shell profile used for the experiment.
-
-Optionally place reconstructible `.pt` files on node-local scratch while keeping
-results, metadata, and cleanup receipts in the repository output directory:
+Optional separate scratch for reconstructible states:
 
 ```bash
 export REVISION_FULL_STATE_DIR=/scratch/$USER/sg-mmp-revision-states
 mkdir -p "$REVISION_FULL_STATE_DIR"
 ```
 
-If `/scratch` is erased when a scheduler job ends, completed evidence is still
-safe on persistent storage. An interrupted state may need to be rebuilt, so use
-scratch only for a job that keeps the same node or accept that recomputation risk.
+Keep these exports identical in every later shell/tmux session.
 
-## 2. Download models directly on the server
-
-The model downloader resolves each upstream revision to an immutable Hugging
-Face commit SHA, resumes interrupted files, and writes the resolved provenance
-to `experiments/revision_full/outputs/model_snapshot_manifest.json`. Download the three public models
-first:
+## 2. Stage immutable models and all datasets while online
 
 ```bash
 python experiments/revision_full/download_models.py --models qwen05 qwen15 smollm
-```
-
-Gemma is gated. Sign in to Hugging Face, accept the Gemma license at
-`https://huggingface.co/google/gemma-2-2b-it`, and authenticate on the server
-without committing or printing the token:
-
-```bash
 hf auth login
 python experiments/revision_full/download_models.py --models gemma2
-```
-
-Expected local directories are `models/Qwen2.5-0.5B`,
-`models/Qwen2.5-1.5B`, `models/SmolLM-1.7B` (the checkpoint is
-SmolLM2-1.7B), and `models/gemma-2-2b-it`. Their combined weights are about
-11.9 GiB. Rerunning the same command resumes against the SHA recorded in the
-manifest rather than silently moving to a newer checkpoint.
-
-If the official Hugging Face endpoint is blocked, the public models may be
-downloaded through a mirror:
-
-```bash
-python experiments/revision_full/download_models.py \
-  --models qwen05 qwen15 smollm \
-  --endpoint https://hf-mirror.com
-```
-
-Use the official authenticated endpoint for Gemma. If compute nodes have no
-internet, run the downloader on a networked login node that shares `/data`, or
-ask the administrator to pre-stage the four pinned snapshots. A physical-disk
-fallback should use exFAT/NTFS or split archives; FAT32 cannot hold Gemma's
-approximately 5-GB first shard.
-
-## 3. Download data and run fail-fast checks
-
-```bash
 python experiments/revision_full/download_core_datasets.py
+```
+
+Gemma requires accepting its Hugging Face license. The model downloader resolves an immutable upstream commit and hashes every weight shard. The dataset downloader resolves all core and panel tasks—including the custom generative ASDiv task—and records row counts, fingerprints, and cache-file hashes. If compute nodes lack internet, run these commands on a networked login node sharing the same `/data` and cache paths.
+
+After staging, freeze network dependence:
+
+```bash
+export HF_HUB_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
+```
+
+## 3. Select the only allowed batch settings before formal output
+
+Start conservatively at generation batch 4 per process and MCQ item batch 2 per process:
+
+```bash
+export REVISION_FULL_EVAL_BATCH_SIZE=4
+export REVISION_FULL_FORMAT_BATCH_SIZE=2
+cp experiments/revision_full/server_env.template.sh server_env.sh
+```
+
+Smoke all architectures using GSM8K train only. The commands may be run in two terminals, one sequence per GPU:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python experiments/revision_full/run.py smoke-eval --model gemma2 --batch-size 4 --format-batch-size 2
+CUDA_VISIBLE_DEVICES=0 python experiments/revision_full/run.py smoke-eval --model qwen05 --batch-size 4 --format-batch-size 2
+CUDA_VISIBLE_DEVICES=1 python experiments/revision_full/run.py smoke-eval --model smollm --batch-size 4 --format-batch-size 2
+CUDA_VISIBLE_DEVICES=1 python experiments/revision_full/run.py smoke-eval --model qwen15 --batch-size 4 --format-batch-size 2
+```
+
+If any smoke test OOMs, change the environment globally and in `server_env.sh` to `2` and `1`, rerun all four smoke tests, and use those values everywhere. Two GPUs do not justify doubling a per-process batch. Once `prepare` creates the v4 lock or any formal sample exists, do not change batch size; the pipeline rejects mixed-batch resume files.
+
+## 4. Lock, verify, and make the GO/NO-GO decision
+
+```bash
 python -m unittest discover -s experiments/revision_full -p "test*.py" -v
 python experiments/revision_full/run.py prepare --force
 python experiments/revision_full/format_control.py --prepare-only --force
-python experiments/revision_full/server_preflight.py
+python experiments/revision_full/server_preflight.py --expected-gpus 2 --concurrent-models 2
 ```
 
-The preflight checks CUDA, package versions, all four local models, GSM8K/WikiText caches, protocol lock, RAM, and disk. Do not launch long runs until it prints `"ready": true`.
+The preflight checks both visible GPUs, package compatibility, system RAM, free space on persistent/state filesystems, model revisions and hashes, every dataset cache hash, offline mode, the v4 protocol lock, full-test size, batch settings, and format manifest. Do not launch the matrix unless the final JSON contains `"ready": true`.
 
-The remaining lm-evaluation-harness datasets are downloaded on first use. If compute nodes have no internet, run one short job on a networked login/download node with the same `HF_HOME`, or ask the administrator to pre-stage that cache.
+Hashing all weight and dataset files reads several gigabytes once and may take minutes on a shared disk. That is intentional: it finds corruption or a wrong cache before multi-day computation.
 
-## 4. Run on one GPU
-
-For a single GPU, the safest complete sequence is:
+Before starting the long shards, run the first formal screen-state build for the two largest state estimates, one command per GPU/terminal:
 
 ```bash
-python experiments/revision_full/make_server_plan.py > server_all.sh
-CUDA_VISIBLE_DEVICES=0 bash server_all.sh 2>&1 | tee server_all.log
+CUDA_VISIBLE_DEVICES=0 python experiments/revision_full/run.py build-screen-bank --model gemma2 --split-id 0 --calib-seed 41
+CUDA_VISIBLE_DEVICES=1 python experiments/revision_full/run.py build-screen-bank --model smollm --split-id 0 --calib-seed 41
 ```
 
-This is resumable but long. The generated script enables `set -euo pipefail`, so any experiment or cleanup-gate failure stops the sequence before another state is created. Each cleanup checkpoint first validates the exact required item IDs and downstream panels, hashes the retained evidence, writes a persistent receipt, and only then deletes the reconstructible `.pt`. On rerun, completed evidence is checked before state existence, so cleaned states are not rebuilt. Do not add `--force` when resuming a normal interruption.
+This validates real calibration, quantization, CUDA, RAM, and concurrent state writes before hundreds of evaluations. The later shards validate and reuse these exact formal states, so the pilot is not discarded work. If it fails, no accuracy result exists yet; fix the environment/code and rebuild without invalidating other evidence.
 
-## 5. Optional multi-GPU execution
+## 5. Generate two non-overlapping model shards
 
-Run the global preparation once, then create one model plan per GPU:
+Use largest-plus-smallest pairing to balance runtime:
 
 ```bash
 mkdir -p server_plans logs
-python experiments/revision_full/make_server_shard.py --model qwen05 > server_plans/qwen05.sh
-python experiments/revision_full/make_server_shard.py --model qwen15 > server_plans/qwen15.sh
-python experiments/revision_full/make_server_shard.py --model smollm > server_plans/smollm.sh
-python experiments/revision_full/make_server_shard.py --model gemma2 > server_plans/gemma2.sh
+python experiments/revision_full/make_server_shard.py --models gemma2 qwen05 > server_plans/gpu0.sh
+python experiments/revision_full/make_server_shard.py --models smollm qwen15 > server_plans/gpu1.sh
 ```
 
-Start four persistent `tmux` sessions:
+Start persistent sessions. Ensure the cache, offline, state-directory, and batch exports above are visible inside both sessions (placing them in a small `server_env.sh` and sourcing it is convenient):
 
 ```bash
-tmux new-session -d -s qwen05 "cd /data/$USER/ptq-benchmark && source .venv/bin/activate && CUDA_VISIBLE_DEVICES=0 bash server_plans/qwen05.sh 2>&1 | tee logs/qwen05.log"
-tmux new-session -d -s qwen15 "cd /data/$USER/ptq-benchmark && source .venv/bin/activate && CUDA_VISIBLE_DEVICES=1 bash server_plans/qwen15.sh 2>&1 | tee logs/qwen15.log"
-tmux new-session -d -s smollm "cd /data/$USER/ptq-benchmark && source .venv/bin/activate && CUDA_VISIBLE_DEVICES=2 bash server_plans/smollm.sh 2>&1 | tee logs/smollm.log"
-tmux new-session -d -s gemma2 "cd /data/$USER/ptq-benchmark && source .venv/bin/activate && CUDA_VISIBLE_DEVICES=3 bash server_plans/gemma2.sh 2>&1 | tee logs/gemma2.log"
+tmux new-session -d -s revision_gpu0 "cd /data/$USER/ptq-benchmark && source .venv/bin/activate && source server_env.sh && CUDA_VISIBLE_DEVICES=0 bash server_plans/gpu0.sh 2>&1 | tee logs/gpu0.log"
+tmux new-session -d -s revision_gpu1 "cd /data/$USER/ptq-benchmark && source .venv/bin/activate && source server_env.sh && CUDA_VISIBLE_DEVICES=1 bash server_plans/gpu1.sh 2>&1 | tee logs/gpu1.log"
 ```
 
-Monitor without interrupting jobs:
+Each process sees its physical card as `cuda:0`. Model-specific status, runtime summaries, samples, state metadata, and cleanup receipts use separate paths. Dataset/model caches are shared read-only during formal execution.
+
+Monitor without modifying outputs:
 
 ```bash
 nvidia-smi
 tmux ls
-tail -f logs/qwen05.log
+tail -f logs/gpu0.log
+df -h /data/$USER
+du -sh experiments/revision_full/outputs "${REVISION_FULL_STATE_DIR:-experiments/revision_full/outputs/states}"
 ```
 
-Each process sees its assigned physical GPU as `cuda:0`. All model-specific artifacts have distinct paths. The shared `outputs/status.json` is only a latest-status display and is not used as numerical evidence.
+The plan creates one calibration bank and at most one materialized state per process. Cleanup occurs immediately after all consumers of that state pass exact completeness checks. It hashes small persistent evidence and metadata, writes a receipt, and deletes only reconstructible `.pt` files. This adds little GPU time; shared-disk I/O is the main overhead. Do not add `--force` during normal resume.
 
-## 6. Final analysis and external work
+If a shard stops, inspect the last traceback, fix the external cause, and rerun the same shard. Completed v4 rows are validated and skipped; partial rows resume only if IDs, provenance, batch, and decoding settings match. Never concatenate JSONL files manually.
 
-After all four model sessions finish:
+## 6. Core analysis, annotation, and external baselines
+
+After both shards finish:
 
 ```bash
-source .venv/bin/activate
 python experiments/revision_full/analyze.py
 python experiments/revision_full/readiness.py --stage core
 ```
 
-Then complete the blinded annotation sheets and the isolated official TaCQ and HAWQ-V2 runs described in `TACQ_INTEGRATION.md`. Register both methods, rerun analysis, and require:
+`core` must pass before using any new number. Then annotate each primary model's generated blinded CSV. Every row needs `consensus_output_a_label` and `consensus_output_b_label`; the 40 rows marked `double_code_required=1` also need both rater-1 and rater-2 labels for both outputs. Summarize each sheet:
 
 ```bash
+python experiments/revision_full/error_analysis.py summarize --annotations <blinded_annotation.csv>
+```
+
+Run official TaCQ and HAWQ-V2 in isolated environments following `TACQ_INTEGRATION.md`. TaCQ importance artifacts can be checkpoint-sized and are not included in the 55/92-GiB internal estimate. Run external methods one model at a time on scratch, preserve the canonical 1,319-row samples/config/provenance, register them, and then remove their reconstructible intermediates. HAWQ's official repository is not an LLM-ready evaluator, so validate any adaptation before naming it HAWQ-V2.
+
+Final gate:
+
+```bash
+python experiments/revision_full/external_baselines.py validate
+python experiments/revision_full/analyze.py
 python experiments/revision_full/readiness.py --stage resubmission
 ```
 
-## 7. Download results and back up
+An external-baseline or annotation failure does not invalidate already hash-verified v4 core outputs, but it blocks the corresponding manuscript claim and the resubmission gate.
 
-On the server:
+## 7. Back up only irreplaceable evidence
 
 ```bash
 tar -czf revision_full_outputs.tar.gz experiments/revision_full/outputs logs
 ```
 
-On Windows PowerShell:
-
-```powershell
-scp username@server:/data/username/ptq-benchmark/revision_full_outputs.tar.gz .
-```
-
-Keep periodic copies of `experiments/revision_full/outputs/`. The sample JSONL files are the irreplaceable basis of paired statistical analysis; `state_metadata/` and `lifecycle_receipts/` document how deleted states can be regenerated. Precision-bank and materialized `.pt` files are intentionally transient and need not be backed up.
+Download that archive to the workstation. Canonical sample JSONL files, panel records, selections, analysis, model/data manifests, state metadata, and cleanup receipts are persistent evidence. Precision banks, materialized states, TaCQ importance arrays, and temporary checkpoints are reconstructible and need not be backed up after their evidence gates pass.

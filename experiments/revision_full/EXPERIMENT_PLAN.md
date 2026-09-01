@@ -1,77 +1,65 @@
-# Code Experiment Plan
+# Rejection-revision experiment plan (revision-full-v4)
 
-## Material Passport
+Status: code-verified; GPU results, external baselines, and human annotation pending.
 
-- Origin Skill: experiment-agent
-- Origin Mode: implementation and validation
-- Origin Date: 2026-08-31
-- Verification Status: CODE-VERIFIED; GPU RESULTS PENDING
-- Version Label: revision_full_v3_resource_aware
+## Confirmatory question and separation rules
 
-## Objective and fixed hypotheses
+The primary question is whether train-selected SG-MMP improves GPTQ-W4 on the complete GSM8K test set under the same parameter-weighted precision budget. GSM8K train is used for demonstrations and layer-selection development only. The official 1,319-example test split is untouched until final evaluation and is never used to select layers, hyperparameters, random allocations, or calibration settings.
 
-The primary question is whether train-selected SG-MMP improves GPTQ-W4 on the complete GSM8K test set under a matched parameter-weighted bit budget. Secondary questions test whether the gain survives calibration variability, exceeds uniform-bit and allocation controls, generalizes across models/tasks, changes with answer format, and has a measurable layer-level causal diagnostic.
+Historical GSM8K-300/500 runs are exploratory provenance. They must not be pooled with, substituted for, or used to fill missing v4 results. Old files remain intact; revised manuscript tables and conclusions must be regenerated only from `experiments/revision_full/outputs/`.
 
-## Hard protocol gates
+## Frozen internal matrix
 
-1. Screening uses three disjoint 256-example subsets from GSM8K train (768 unique development items); the fixed demonstrations and all test examples are excluded.
-2. Every headline GSM8K result uses all 1,319 official test examples through one direct 5-shot greedy evaluator.
-3. The broad lm-evaluation-harness table contains ARC-Challenge, HellaSwag, MMLU, and the explicit MMLU high-school-mathematics subset only; it is forbidden from generating a second GSM8K headline value.
-4. Every model receives a native screen. Transferring Qwen-selected layers to another architecture is forbidden.
-5. The allocation target is a parameter-weighted average precision of at most 5.0 bits. Every matched control must be within 0.01 bit internally; external baselines must be within 0.05 bit.
-6. SG-MMP and internal mixed allocations use the same calibration-specific W4/W8 precision bank.
-7. Calibration robustness uses three fixed WikiText seeds: 41, 97, and 193. All 128 packed sequences contribute to a fixed per-module activation reservoir.
-8. Required uniform baselines are GPTQ-W4, W5, and W6 for every model and seed.
-9. Required allocation controls are 30 matched random-layer and 30 matched random-module allocations for every primary model at seed 41. Thirty is fixed in advance and supports the reviewer-requested “dozens” and empirical-percentile analysis.
-10. Required placement controls are pure q/k/v, o, and FFN curves plus budget-matched q/k/v-priority, o-priority, FFN-priority, and diagonal-Hessian-reconstruction allocations.
-11. All inferential families use multiplicity correction. Calibration uncertainty uses a two-stage seed/example bootstrap, not only a pooled per-example interval.
-12. Historical 300/500 results are provenance only and cannot enter revised headline estimates.
-13. Layer-selection stability is recomputed in 2,000 fixed-seed bootstrap resamples of the three disjoint train-screen units; report inclusion probabilities, exact-set rate, Jaccard interval, and the three-unit limitation.
+1. Models: Qwen2.5-0.5B, Qwen2.5-1.5B, and SmolLM2-1.7B are primary; Gemma-2-2B-it is a predeclared family/boundary check. Every model gets a native selection.
+2. Selection: three disjoint 256-example GSM8K-train screens, excluding the five demonstrations. Each split is paired with a different WikiText calibration seed (`41`, `97`, `193`) and a real GPTQ-W4 state. Layer ranking is aggregated across splits.
+3. Selection stability: 2,000 fixed-seed bootstrap resamples of the three split-level units. Report inclusion probabilities, exact-set rate, Jaccard interval, and the limitation of having only three split units.
+4. Canonical accuracy: direct five-shot greedy generation on all 1,319 official GSM8K test examples, with `max_new_tokens=256` and one locked per-GPU batch size.
+5. Calibration robustness: every model runs GPTQ-W4, uniform GPTQ-W5, uniform GPTQ-W6, and SG-MMP for all three calibration seeds.
+6. Same-budget controls: each primary model runs 30 unique preregistered random-layer and 30 unique preregistered random-module allocations at seed 41. Allocation lists and hashes are stored before evaluation.
+7. Placement controls: every model runs pure q/k/v, output-projection, and FFN precision curves plus budget-matched q/k/v-priority, output-priority, FFN-priority, and diagonal-Hessian reconstruction allocations.
+8. Format/task controls at seed 41: FP16, GPTQ-W4, and SG-MMP run the identical 1,319 GSM8K items as both free generation and deterministic four-choice scoring. They also run ARC-Challenge, HellaSwag, MMLU, MMLU high-school mathematics, generative SVAMP, generative ASDiv, MATH-500, and TruthfulQA generation.
+9. Causal diagnostic: Qwen2.5-0.5B uses a fixed, model-output-independent 200-item test subset. Aligned FP16 outputs replace GPTQ-W4 block, self-attention, or MLP outputs at every layer. The primary outcome is gold final-answer-token NLL; full reasoning-trace NLL/logit similarity/KL are secondary. Holm correction is applied separately to the primary and secondary NLL families. This is diagnostic, not generated-answer accuracy.
+10. Error audit: all 1,319 W4/SG transitions, parse failures, EOS/truncation status, and generated lengths are automatic. For every primary model, 200 fixed-seed non-both-correct cases are blinded. Each output receives its own label; all cases require two consensus output labels and a fixed preregistered set of 40 cases is double-coded.
 
-## Models and tasks
+## Statistical reporting
 
-Primary models are Qwen2.5-0.5B, Qwen2.5-1.5B, and SmolLM2-1.7B. Gemma-2-2B-it is a predeclared family/boundary check.
+- Primary paired comparison: accuracy difference, paired bootstrap 95% interval, exact McNemar test, and Holm adjustment across the predeclared model/seed family.
+- Calibration uncertainty: all three run deltas plus two-stage bootstrap over calibration seeds and paired examples; report mean, SD, minimum, maximum, and interval. Three seeds do not justify a universal invariance claim.
+- Quantization severity: absolute accuracy degradation, relative error increase, and normalized recovery against FP16. Cross-task values are descriptive unless item-level pairing exists.
+- Allocation evidence: SG percentile and empirical one-sided p-value against both 30-member null families. Missing or duplicate allocations disable the claim.
+- Format confounding: paired difference-in-differences on the same GSM8K IDs with multiplicity correction.
+- Negative or inconsistent results are retained. No post-result model, seed, task, or layer-set deletion is allowed.
 
-- Canonical task: full GSM8K test, direct free generation.
-- Same-item format control: deterministic four-choice GSM8K for the same 1,319 item IDs.
-- Broad discriminative panel: ARC-Challenge, HellaSwag, MMLU, plus an explicitly reported MMLU high-school-mathematics multiple-choice score.
-- Generative transfer panel: SVAMP, ASDiv, MATH-500, TruthfulQA-generation.
-
-## Decision rules
+## Reviewer-facing decision gates
 
 | Claim | Required evidence |
 |---|---|
-| SG-MMP improves W4 | Positive full-test delta, paired-bootstrap CI excluding zero, and Holm-adjusted exact McNemar p below 0.05 |
-| Gain is stable across calibration | Three run deltas plus two-stage seed/example 95% CI; report every run, mean, SD, minimum, and maximum; do not claim broad seed invariance from only three runs |
-| Gain is not merely extra precision | Accuracy-versus-bit comparison against uniform W5 and W6; wording must follow the observed uncertainty |
-| Placement is informative | Percentile against both 30-allocation null families and comparison with budget-matched role/Hessian controls |
-| Format matters | Paired difference-in-differences interaction over identical item IDs, with corrected inference |
-| Mechanistic propagation | Fixed activation-patching result with corrected inference; otherwise delete causal/mechanistic wording |
-| External competitiveness | Official TaCQ plus HAWQ-V2 runs on Qwen 0.5B/1.5B, canonical evaluator, complete per-item generations, pinned commits/configs, matched bit budget |
-| Deployment efficiency | Disabled unless packed serialized size, peak memory, latency, and throughput are measured with real packed kernels |
+| SG-MMP improves W4 | Positive full-test paired delta, CI excluding zero, and adjusted McNemar p below 0.05 |
+| Robust to calibration | Three complete seed runs and the hierarchical interval; wording follows observed heterogeneity |
+| Not merely extra precision | Direct W5/W6 accuracy-versus-bit comparisons and matched internal placement controls |
+| Learned placement matters | Complete 30+30 unique random controls plus role/Hessian matched controls |
+| Format contributes | Corrected same-item generation-versus-MCQ interaction |
+| Transfers beyond one benchmark | Full locked task panels with FP16/W4/SG and relative-error reporting |
+| Mechanistic propagation | Complete block/attention/MLP patching with corrected final-answer outcome; otherwise remove causal language |
+| Competitive with automated mixed precision | Official TaCQ and HAWQ-V2 results for Qwen 0.5B/1.5B, complete canonical samples, pinned code/config, and budget within 0.05 bit |
+| Deployment efficiency | Disabled until real packed-kernel size, peak memory, latency, and throughput exist |
 
-## Error analysis
+## Required gates and artifacts
 
-Automatic error analysis covers all 1,319 seed-41 W4/SG-MMP item transitions, parse failures, EOS status, generated-token count, and truncation flags. For each primary model, a fixed-seed sample of 200 non-both-correct items is blinded and annotated using arithmetic, reasoning setup, state tracking, extraction/format, truncation, hallucination, or other. At least 40 cases are double coded; all 200 require consensus labels. Cohen's kappa and category counts are reported.
-
-## Expected artifacts and gates
-
-| Artifact | Success condition |
+| Gate/artifact | Exact success condition |
 |---|---|
-| `outputs/protocol_lock.json` | `revision-full-v3`, full 1,319 test, three seeds, packed calibration, single evaluator |
-| `outputs/screens/` and `outputs/selections/` | Native train-only selection for every model |
-| `outputs/results/samples/` | Every required method contains exactly IDs 0-1318 |
-| `outputs/results/format_control/` | Same complete item IDs for FP16/W4/SG-MMP |
-| `outputs/results/broad/` | Exactly ARC-Challenge, HellaSwag, MMLU, and MMLU high-school mathematics; no GSM8K |
-| `outputs/results/extra/` | Four complete task records with logged samples |
-| `outputs/results/causal_patch/` | 200 preregistered items and every decoder layer |
-| `outputs/external_baselines/` | Hash-verified official baseline provenance and canonical samples |
-| `outputs/state_metadata/` | Persistent protocol, budget, seed, and source-bank metadata for reconstructible states |
-| `outputs/lifecycle_receipts/` | SHA256-identified evidence that passed before each transient `.pt` deletion |
-| `outputs/analysis_full.md` | Paired, hierarchical, random-control, format-interaction, and external comparisons |
-| `readiness.py --stage core` | No missing internal run |
-| `readiness.py --stage resubmission` | TaCQ, HAWQ-V2, and human annotation also complete |
+| `protocol_lock.json` | `revision-full-v4`, frozen dataset hash, full test, three calibration-repeated GPTQ screens, execution batch/token lock |
+| dataset/model manifests | Immutable model revisions plus weight hashes; every core/panel dataset cache file fingerprinted and available offline |
+| screens/selections | Exactly one baseline and every native layer per split; 30+30 unique allocation manifests |
+| canonical/format samples | Exactly IDs 0-1318 once, valid correctness fields, v4 provenance, locked batch settings |
+| panel records | Exact task set, no second GSM8K evaluator, full logged samples for generative tasks |
+| causal record | Exactly 200 fixed IDs and every block/attention/MLP-by-layer pair |
+| lifecycle receipts | Evidence validated and hashed before each reconstructible state deletion |
+| `readiness.py --stage core` | Every preregistered internal computation complete |
+| `readiness.py --stage resubmission` | Core plus official external baselines and completed blinded annotations |
 
-## What must wait for the server
+The pipeline is fail closed: partial files, duplicate IDs, stale protocol/data/model provenance, changed batch settings, missing task samples, or an incomplete downstream consumer stop execution and preserve the needed state.
 
-The protocol, code paths, output schemas, analysis, and fail-closed gates are fixed now. Model screening, quantization, full inference, causal patching, and third-party TaCQ/HAWQ-V2 execution require server compute. Human annotation must wait until the new generations exist. These pending computations must not be replaced with historical subset results.
+## What is not solved before server execution
+
+GPU memory behavior must still pass train-only smoke tests on the actual two RTX 3090 cards. Numerical claims remain unknown until the core runs complete. TaCQ produces large importance artifacts and HAWQ's official implementation is not natively an LLM pipeline, so their adaptations must be validated separately; neither may be replaced by the internal Hessian control. Human annotations can start only after new generations exist. These remaining items can be added without rerunning valid v4 core outputs because the canonical per-item evidence and provenance are retained.

@@ -15,6 +15,7 @@ from ptq.quant.gptq import (
     gptq_quantize_linear_multi,
 )
 from ptq.quant.mixed_precision import compose_precision_state
+from ptq.eval import run_eval_on_model
 
 
 class _TinyTokenizer:
@@ -128,6 +129,22 @@ class QuantizationPipelineTests(unittest.TestCase):
         self.assertTrue(
             torch.allclose(torch.tensor(batched), torch.tensor(separate), atol=1e-6)
         )
+
+    def test_broad_evaluator_extracts_group_metric(self):
+        with (
+            patch("ptq.eval.HFLM", return_value=object()),
+            patch(
+                "ptq.eval.simple_evaluate",
+                return_value={
+                    "results": {},
+                    "groups": {"mmlu": {"acc,none": 0.25}},
+                },
+            ),
+        ):
+            scores = run_eval_on_model(
+                object(), object(), ["mmlu"], batch_size=4, limit=None
+            )
+        self.assertEqual(scores, {"mmlu": 25.0})
 
 
 if __name__ == "__main__":

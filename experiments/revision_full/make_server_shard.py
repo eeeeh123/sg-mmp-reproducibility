@@ -14,21 +14,35 @@ from experiments.revision_full.protocol import MODEL_SPECS
 SETUP_COMMANDS = 4
 
 
+def shard_commands(models: list[str], include_setup: bool = False) -> list[str]:
+    if not models or any(model not in MODEL_SPECS for model in models):
+        raise ValueError("A shard needs one or more known models")
+    if len(models) != len(set(models)):
+        raise ValueError("Shard models must be unique")
+    all_commands = list(commands())
+    selected = list(all_commands[:SETUP_COMMANDS]) if include_setup else []
+    for model in models:
+        marker = f"--model {model}"
+        selected.extend(command for command in all_commands if marker in command)
+    return selected
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", choices=MODEL_SPECS, required=True)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--model", choices=MODEL_SPECS)
+    group.add_argument("--models", nargs="+", choices=MODEL_SPECS)
     parser.add_argument("--include-setup", action="store_true")
     args = parser.parse_args()
-    all_commands = list(commands())
     print("#!/usr/bin/env bash")
     print("set -euo pipefail")
-    if args.include_setup:
-        for command in all_commands[:SETUP_COMMANDS]:
-            print(command)
-    marker = f"--model {args.model}"
-    for command in all_commands:
-        if marker in command:
-            print(command)
+    selected = args.models or [args.model]
+    try:
+        selected_commands = shard_commands(selected, args.include_setup)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    for command in selected_commands:
+        print(command)
 
 
 if __name__ == "__main__":

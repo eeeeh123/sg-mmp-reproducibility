@@ -18,15 +18,21 @@ from experiments.revision_full.protocol import (
     CAUSAL_PATCH_N,
     GSM8K_TEST_SIZE,
     MODEL_SPECS,
+    PROTOCOL_VERSION,
     RANDOM_CALIB_SEED,
     RESULTS_DIR,
     fixed_causal_patch_indices,
+    method_id,
+    state_metadata_path,
     state_path,
 )
 from experiments.revision_full.run import (
     configure_determinism,
+    dataset_provenance,
     get_dataset,
     load_model_tokenizer,
+    model_provenance,
+    require_current_state_metadata,
     require_protocol,
 )
 
@@ -51,14 +57,17 @@ def append_jsonl(path: Path, row: dict) -> None:
         stream.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def target_metrics(logits, reference_logits, input_ids, prompt_length: int) -> dict:
+INTERVENTIONS = ("block", "attention", "mlp")
+
+
+def _span_metrics(logits, reference_logits, input_ids, target_start: int) -> dict:
     import torch
     import torch.nn.functional as functional
 
-    start = max(0, prompt_length - 1)
+    start = max(0, target_start - 1)
     candidate = logits[:, start:-1, :].float()
     reference = reference_logits[:, start:-1, :].float()
-    targets = input_ids[:, prompt_length:]
+    targets = input_ids[:, target_start:]
     if candidate.shape[1] != targets.shape[1] or targets.numel() == 0:
         raise RuntimeError("Teacher-forced target span is empty or misaligned")
     nll = functional.cross_entropy(
@@ -72,10 +81,66 @@ def target_metrics(logits, reference_logits, input_ids, prompt_length: int) -> d
         reduction="batchmean",
     ) / candidate.shape[1]
     return {
-        "target_nll": float(nll.item()),
-        "target_logit_cosine": float(cosine.item()),
-        "target_kl_from_fp16": float(kl.item()),
+        "nll": float(nll.item()),
+        "logit_cosine": float(cosine.item()),
+        "kl_from_fp16": float(kl.item()),
+        "tokens": int(targets.numel()),
     }
+
+
+def target_metrics(
+    logits,
+    reference_logits,
+    input_ids,
+    prompt_length: int,
+    final_answer_start: int,
+) -> dict:
+    trace = _span_metrics(logits, reference_logits, input_ids, prompt_length)
+    final = _span_metrics(logits, reference_logits, input_ids, final_answer_start)
+    return {
+        "target_nll": trace["nll"],
+        "target_logit_cosine": trace["logit_cosine"],
+        "target_kl_from_fp16": trace["kl_from_fp16"],
+        "target_tokens": trace["tokens"],
+        "final_answer_nll": final["nll"],
+        "final_answer_logit_cosine": final["logit_cosine"],
+        "final_answer_kl_from_fp16": final["kl_from_fp16"],
+        "final_answer_tokens": final["tokens"],
+    }
+
+
+def final_answer_token_offset(tokenizer, answer: str, answer_token_ids: list[int]) -> int:
+    marker = answer.rfind("####")
+    if marker < 0:
+        raise RuntimeError("GSM8K answer lacks the locked final-answer delimiter")
+    char_start = marker + 4
+    while char_start < len(answer) and answer[char_start].isspace():
+        char_start += 1
+    try:
+        encoded = tokenizer(
+            answer,
+            add_special_tokens=False,
+            return_offsets_mapping=True,
+        )
+        offsets = encoded["offset_mapping"]
+        for index, (_, end) in enumerate(offsets):
+            if int(end) > char_start:
+                return index
+    except (KeyError, NotImplementedError, TypeError, ValueError):
+        pass
+    suffix_ids = tokenizer(
+        answer[char_start:], add_special_tokens=False
+    )["input_ids"]
+    for index in range(len(answer_token_ids)):
+        if answer_token_ids[index:] == suffix_ids:
+            return index
+    prefix_ids = tokenizer(
+        answer[:char_start], add_special_tokens=False
+    )["input_ids"]
+    offset = min(len(prefix_ids), len(answer_token_ids) - 1)
+    if offset < 0:
+        raise RuntimeError("Final-answer token span is empty")
+    return offset
 
 
 def patch_hook(reference_hidden):
@@ -91,6 +156,14 @@ def patch_hook(reference_hidden):
     return hook
 
 
+def capture_hook(store: dict, key: tuple[int, str]):
+    def hook(module, args, output):
+        value = output[0] if isinstance(output, tuple) else output
+        store[key] = value.detach()
+
+    return hook
+
+
 def run(model_key: str, calib_seed: int, force: bool) -> None:
     import torch
     from experiments.fix_gsm8k_500.direct_eval import build_fewshot, build_model_prompts
@@ -101,12 +174,43 @@ def run(model_key: str, calib_seed: int, force: bool) -> None:
     locked = lock.get("causal_patch_diagnostic", {})
     expected = fixed_causal_patch_indices()
     if locked.get("indices") != expected or locked.get("n") != CAUSAL_PATCH_N:
-        raise RuntimeError("Protocol lock does not contain the v2 causal patch subset")
+        raise RuntimeError("Protocol lock does not contain the frozen causal patch subset")
+    identity = {
+        "protocol_version": PROTOCOL_VERSION,
+        "dataset_manifest_sha256": dataset_provenance()["manifest_sha256"],
+        "model_revision": model_provenance(model_key)["resolved_revision"],
+        "calibration_seed": calib_seed,
+    }
     path = result_path(model_key, calib_seed)
     if force and path.exists():
         path.unlink()
     rows = read_jsonl(path)
-    done = {int(row["doc_id"]) for row in rows}
+    row_ids = [int(row["doc_id"]) for row in rows]
+    if len(row_ids) != len(set(row_ids)) or not set(row_ids).issubset(set(expected)):
+        raise RuntimeError(f"Duplicate or out-of-protocol causal rows in {path}")
+    pair_sets = []
+    for row in rows:
+        patches = row.get("patches", [])
+        pairs = [
+            (item.get("intervention"), int(item.get("layer", -1)))
+            for item in patches
+        ]
+        if (
+            any(row.get(key) != value for key, value in identity.items())
+            or int(row.get("w4_correct", -1)) not in (0, 1)
+            or int(row.get("final_answer_tokens", 0)) <= 0
+            or not pairs
+            or len(pairs) != len(set(pairs))
+            or {intervention for intervention, _ in pairs} != set(INTERVENTIONS)
+            or any("final_answer_nll" not in item for item in patches)
+        ):
+            raise RuntimeError(
+                f"Existing causal row uses a stale or incomplete schema: {path}"
+            )
+        pair_sets.append(set(pairs))
+    if pair_sets and any(pairs != pair_sets[0] for pairs in pair_sets[1:]):
+        raise RuntimeError(f"Existing causal rows cover different interventions: {path}")
+    done = set(row_ids)
     if not force and causal_complete(model_key, calib_seed):
         print(f"[skip] complete causal patch: {path}", flush=True)
         return
@@ -118,6 +222,13 @@ def run(model_key: str, calib_seed: int, force: bool) -> None:
     state = state_path(model_key, calib_seed, "gptq_w4")
     if not state.exists():
         raise FileNotFoundError(f"Run gptq_w4 materialization first: {state}")
+    require_current_state_metadata(
+        state_metadata_path(model_key, calib_seed, "gptq_w4"),
+        state,
+        model_key,
+        calib_seed,
+        "gptq_w4",
+    )
 
     configure_determinism(calib_seed)
     fp16_model, tokenizer = load_model_tokenizer(model_key)
@@ -129,6 +240,11 @@ def run(model_key: str, calib_seed: int, force: bool) -> None:
     layers = list(w4_model.model.layers)
     train, test = get_dataset()
     prefix = build_fewshot(train, k=5)
+    from experiments.revision_full.analyze import correctness
+
+    w4_correctness = correctness(
+        model_key, method_id("gptq_w4", calib_seed)
+    )
 
     for ordinal, doc_id in enumerate(expected, start=1):
         if doc_id in done:
@@ -141,62 +257,126 @@ def run(model_key: str, calib_seed: int, force: bool) -> None:
         answer_ids = tokenizer(
             example["answer"], add_special_tokens=False, return_tensors="pt"
         )["input_ids"].to(fp16_model.device)
+        final_offset = final_answer_token_offset(
+            tokenizer, example["answer"], answer_ids[0].tolist()
+        )
         input_ids = torch.cat([prompt_ids, answer_ids], dim=1)
         attention_mask = torch.ones_like(input_ids)
         prompt_length = int(prompt_ids.shape[1])
+        final_answer_start = prompt_length + final_offset
 
-        with torch.inference_mode():
-            fp16_output = fp16_model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                output_hidden_states=True,
+        reference_components = {}
+        capture_handles = []
+        for layer_index, layer in enumerate(fp16_model.model.layers):
+            capture_handles.append(
+                layer.self_attn.register_forward_hook(
+                    capture_hook(reference_components, (layer_index, "attention"))
+                )
             )
+            capture_handles.append(
+                layer.mlp.register_forward_hook(
+                    capture_hook(reference_components, (layer_index, "mlp"))
+                )
+            )
+        with torch.inference_mode():
+            try:
+                fp16_output = fp16_model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    output_hidden_states=True,
+                )
+            finally:
+                for handle in capture_handles:
+                    handle.remove()
             w4_output = w4_model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
             )
         baseline = target_metrics(
-            w4_output.logits, fp16_output.logits, input_ids, prompt_length
+            w4_output.logits,
+            fp16_output.logits,
+            input_ids,
+            prompt_length,
+            final_answer_start,
         )
         fp16_metrics = target_metrics(
-            fp16_output.logits, fp16_output.logits, input_ids, prompt_length
+            fp16_output.logits,
+            fp16_output.logits,
+            input_ids,
+            prompt_length,
+            final_answer_start,
         )
         patches = []
         for layer_index, layer in enumerate(layers):
-            reference_hidden = fp16_output.hidden_states[layer_index + 1].detach()
-            handle = layer.register_forward_hook(patch_hook(reference_hidden))
-            try:
-                with torch.inference_mode():
-                    patched_output = w4_model(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                    )
-                metrics = target_metrics(
-                    patched_output.logits,
-                    fp16_output.logits,
-                    input_ids,
-                    prompt_length,
+            targets = {
+                "block": (
+                    layer,
+                    fp16_output.hidden_states[layer_index + 1].detach(),
+                ),
+                "attention": (
+                    layer.self_attn,
+                    reference_components[(layer_index, "attention")],
+                ),
+                "mlp": (
+                    layer.mlp,
+                    reference_components[(layer_index, "mlp")],
+                ),
+            }
+            for intervention in INTERVENTIONS:
+                target_module, reference_hidden = targets[intervention]
+                handle = target_module.register_forward_hook(
+                    patch_hook(reference_hidden)
                 )
-            finally:
-                handle.remove()
-            patches.append({"layer": layer_index, **metrics})
-            del patched_output, reference_hidden
-            torch.cuda.empty_cache()
+                try:
+                    with torch.inference_mode():
+                        patched_output = w4_model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                        )
+                    metrics = target_metrics(
+                        patched_output.logits,
+                        fp16_output.logits,
+                        input_ids,
+                        prompt_length,
+                        final_answer_start,
+                    )
+                finally:
+                    handle.remove()
+                patches.append(
+                    {
+                        "layer": layer_index,
+                        "intervention": intervention,
+                        **metrics,
+                    }
+                )
+                del patched_output
+                torch.cuda.empty_cache()
 
         append_jsonl(
             path,
             {
+                **identity,
                 "doc_id": doc_id,
                 "question": example["question"],
                 "prompt_tokens": prompt_length,
                 "target_tokens": int(answer_ids.shape[1]),
+                "final_answer_tokens": int(answer_ids.shape[1]) - final_offset,
+                "w4_correct": int(w4_correctness[doc_id]),
                 "fp16": fp16_metrics,
                 "gptq_w4": baseline,
                 "patches": patches,
             },
         )
         print(f"{model_key}: causal patch {ordinal}/{CAUSAL_PATCH_N}", flush=True)
-        del fp16_output, w4_output, input_ids, attention_mask, prompt_ids, answer_ids
+        del (
+            fp16_output,
+            w4_output,
+            input_ids,
+            attention_mask,
+            prompt_ids,
+            answer_ids,
+            reference_components,
+        )
         torch.cuda.empty_cache()
 
     summarize(model_key, calib_seed)
@@ -245,51 +425,112 @@ def summarize(model_key: str, calib_seed: int) -> dict:
     rows = read_jsonl(result_path(model_key, calib_seed))
     if len(rows) != CAUSAL_PATCH_N:
         raise RuntimeError(f"Causal patch result incomplete: {len(rows)}/{CAUSAL_PATCH_N}")
-    by_layer: dict[int, list[dict]] = defaultdict(list)
+    ids = [int(row["doc_id"]) for row in rows]
+    if len(ids) != len(set(ids)) or set(ids) != set(fixed_causal_patch_indices()):
+        raise RuntimeError("Causal patch rows are duplicated or use the wrong subset")
+    identity = {
+        "protocol_version": PROTOCOL_VERSION,
+        "dataset_manifest_sha256": dataset_provenance()["manifest_sha256"],
+        "model_revision": model_provenance(model_key)["resolved_revision"],
+        "calibration_seed": calib_seed,
+    }
+    if any(
+        any(row.get(key) != value for key, value in identity.items())
+        for row in rows
+    ):
+        raise RuntimeError("Causal patch rows have stale model/data provenance")
+    by_layer: dict[tuple[str, int], list[dict]] = defaultdict(list)
     for row in rows:
         baseline = row["gptq_w4"]
         for patch in row["patches"]:
-            by_layer[int(patch["layer"])].append(
+            key = (patch["intervention"], int(patch["layer"]))
+            by_layer[key].append(
                 {
                     "nll_reduction": baseline["target_nll"] - patch["target_nll"],
+                    "final_answer_nll_reduction": baseline["final_answer_nll"]
+                    - patch["final_answer_nll"],
                     "cosine_gain": patch["target_logit_cosine"]
                     - baseline["target_logit_cosine"],
                     "kl_reduction": baseline["target_kl_from_fp16"]
                     - patch["target_kl_from_fp16"],
+                    "w4_correct": int(row["w4_correct"]),
                 }
             )
     summaries = []
-    p_values = []
-    for layer, values in sorted(by_layer.items()):
+    trace_p_values = []
+    final_p_values = []
+    for (intervention, layer), values in sorted(by_layer.items()):
+        if len(values) != CAUSAL_PATCH_N:
+            raise RuntimeError(
+                f"Incomplete {intervention}/layer {layer}: {len(values)}/{CAUSAL_PATCH_N}"
+            )
         nll = [row["nll_reduction"] for row in values]
-        p_value = sign_flip_p(nll, seed=20268100 + layer)
-        p_values.append(p_value)
+        final_nll = [row["final_answer_nll_reduction"] for row in values]
+        intervention_offset = INTERVENTIONS.index(intervention) * 1000
+        trace_p = sign_flip_p(nll, seed=20268100 + intervention_offset + layer)
+        final_p = sign_flip_p(
+            final_nll, seed=20269100 + intervention_offset + layer
+        )
+        trace_p_values.append(trace_p)
+        final_p_values.append(final_p)
+        subgroup = {}
+        for label, correctness_value in [("w4_wrong", 0), ("w4_correct", 1)]:
+            selected = [
+                item["final_answer_nll_reduction"]
+                for item in values
+                if item["w4_correct"] == correctness_value
+            ]
+            subgroup[label] = {
+                "n": len(selected),
+                "mean_final_answer_nll_reduction": (
+                    statistics.mean(selected) if selected else None
+                ),
+            }
         summaries.append(
             {
+                "intervention": intervention,
                 "layer": layer,
                 "n": len(values),
                 "mean_nll_reduction": statistics.mean(nll),
-                "nll_reduction_ci95": bootstrap_ci(nll, seed=20268200 + layer),
-                "nll_reduction_sign_flip_p": p_value,
+                "nll_reduction_ci95": bootstrap_ci(
+                    nll, seed=20268200 + intervention_offset + layer
+                ),
+                "nll_reduction_sign_flip_p": trace_p,
                 "fraction_nll_improved": sum(value > 0 for value in nll) / len(nll),
+                "mean_final_answer_nll_reduction": statistics.mean(final_nll),
+                "final_answer_nll_reduction_ci95": bootstrap_ci(
+                    final_nll, seed=20269200 + intervention_offset + layer
+                ),
+                "final_answer_nll_reduction_sign_flip_p": final_p,
+                "fraction_final_answer_nll_improved": sum(
+                    value > 0 for value in final_nll
+                )
+                / len(final_nll),
                 "mean_logit_cosine_gain": statistics.mean(
                     row["cosine_gain"] for row in values
                 ),
                 "mean_kl_reduction": statistics.mean(
                     row["kl_reduction"] for row in values
                 ),
+                "final_answer_stratified_by_w4_correctness": subgroup,
             }
         )
-    for row, corrected in zip(summaries, holm(p_values)):
+    for row, corrected in zip(summaries, holm(trace_p_values)):
         row["nll_reduction_sign_flip_p_holm"] = corrected
+    for row, corrected in zip(summaries, holm(final_p_values)):
+        row["final_answer_nll_reduction_sign_flip_p_holm"] = corrected
     result = {
+        **identity,
         "model_key": model_key,
         "model": MODEL_SPECS[model_key]["display_name"],
-        "calibration_seed": calib_seed,
         "n": CAUSAL_PATCH_N,
         "test_size": GSM8K_TEST_SIZE,
-        "design": "teacher-forced layer-output replacement: GPTQ-W4 activation replaced by aligned FP16 activation",
-        "outcome": "gold reasoning-trace token NLL, logit cosine, and KL from FP16",
+        "design": "teacher-forced aligned FP16 replacement at block, self-attention, and MLP outputs in GPTQ-W4",
+        "interventions": list(INTERVENTIONS),
+        "primary_mechanistic_outcome": "gold final-answer token NLL",
+        "secondary_outcomes": "full gold reasoning-trace token NLL, logit cosine, and KL from FP16",
+        "multiplicity": "Holm correction separately across every intervention-by-layer test for the primary and secondary NLL families",
+        "interpretation_limit": "diagnostic intervention on a fixed test subset; final-answer likelihood is not generated-answer accuracy",
         "layers": summaries,
     }
     output = PATCH_DIR / f"{model_key}__gptq_w4__c{calib_seed}__summary.json"

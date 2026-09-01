@@ -14,13 +14,20 @@ sys.path.insert(0, ".")
 
 from experiments.fix_gsm8k_500.direct_eval import mcnemar_exact_p
 from experiments.revision_full.protocol import (
+    BROAD_TASKS,
     CALIB_SEEDS,
+    DEFAULT_EVAL_BATCH_SIZE,
+    DEFAULT_FORMAT_BATCH_SIZE,
+    EXTRA_TASKS,
     GSM8K_TEST_SIZE,
     MODEL_SPECS,
+    MAX_NEW_TOKENS,
     OUT,
     RANDOM_ALLOCATIONS,
     RANDOM_CALIB_SEED,
     RESULTS_DIR,
+    PROTOCOL_VERSION,
+    STATE_METADATA_DIR,
     method_id,
 )
 
@@ -39,8 +46,25 @@ def correctness(model_key: str, method: str) -> dict[int, int]:
     if not path.exists():
         raise FileNotFoundError(path)
     rows = read_jsonl(path)
+    from experiments.revision_full.run import dataset_provenance, model_provenance
+
+    data_hash = dataset_provenance()["manifest_sha256"]
+    model_revision = model_provenance(model_key)["resolved_revision"]
     by_id = {int(row["doc_id"]): int(row["correct"]) for row in rows}
-    if set(by_id) != set(range(GSM8K_TEST_SIZE)):
+    if len(rows) != GSM8K_TEST_SIZE or len(by_id) != len(rows) or set(by_id) != set(
+        range(GSM8K_TEST_SIZE)
+    ) or (
+        not method.startswith("external_")
+        and any(
+            row.get("protocol_version") != PROTOCOL_VERSION
+            or row.get("dataset_manifest_sha256") != data_hash
+            or row.get("model_revision") != model_revision
+            or int(row.get("eval_batch_size_per_gpu", -1))
+            != DEFAULT_EVAL_BATCH_SIZE
+            or int(row.get("max_new_tokens", -1)) != MAX_NEW_TOKENS
+            for row in rows
+        )
+    ):
         raise RuntimeError(
             f"Incomplete or duplicated full-test result: {path} has {len(by_id)} unique ids"
         )
@@ -56,8 +80,21 @@ def format_correctness(model_key: str, method: str) -> dict[int, int]:
     if not path.exists():
         raise FileNotFoundError(path)
     rows = read_jsonl(path)
+    from experiments.revision_full.run import dataset_provenance, model_provenance
+
+    data_hash = dataset_provenance()["manifest_sha256"]
+    model_revision = model_provenance(model_key)["resolved_revision"]
     by_id = {int(row["doc_id"]): int(row["correct"]) for row in rows}
-    if set(by_id) != set(range(GSM8K_TEST_SIZE)):
+    if len(rows) != GSM8K_TEST_SIZE or len(by_id) != len(rows) or set(by_id) != set(
+        range(GSM8K_TEST_SIZE)
+    ) or any(
+        row.get("protocol_version") != PROTOCOL_VERSION
+        or row.get("dataset_manifest_sha256") != data_hash
+        or row.get("model_revision") != model_revision
+        or int(row.get("format_batch_size_per_gpu", -1))
+        != DEFAULT_FORMAT_BATCH_SIZE
+        for row in rows
+    ):
         raise RuntimeError(
             f"Incomplete format-control result: {path} has {len(by_id)} unique ids"
         )
@@ -197,7 +234,72 @@ def paired_interaction(
     }
 
 
+def relative_error_increase(fp16_accuracy: float, quantized_accuracy: float) -> float | None:
+    baseline_error = 100.0 - fp16_accuracy
+    if baseline_error <= 0:
+        return None
+    return ((100.0 - quantized_accuracy) - baseline_error) / baseline_error
+
+
+PANEL_METRICS = {
+    "svamp": ("exact_match,flexible-extract", "exact_match,none"),
+    "asdiv_gen": ("exact_match,flexible-extract", "exact_match,none"),
+    "hendrycks_math500": (
+        "exact_match,flexible-extract",
+        "exact_match,none",
+    ),
+    "truthfulqa_gen": ("bleu_acc,none", "rouge1_acc,none"),
+}
+
+
+def metric_percentage(metrics: dict, candidates: tuple[str, ...]) -> tuple[str, float]:
+    for name in candidates:
+        if name in metrics:
+            value = metrics[name]
+            if isinstance(value, (list, tuple)):
+                value = value[0]
+            value = float(value)
+            return name, 100.0 * value if abs(value) <= 1.0 else value
+    raise RuntimeError(f"None of the locked metrics {candidates} exists in {sorted(metrics)}")
+
+
+def task_point(
+    model_key: str,
+    method: str,
+    task: str,
+    *,
+    broad: bool,
+) -> tuple[str, float]:
+    directory = "broad" if broad else "extra"
+    record = json.loads(
+        (RESULTS_DIR / directory / f"{model_key}__{method}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    from experiments.revision_full.run import dataset_provenance, model_provenance
+
+    if (
+        record.get("protocol_version") != PROTOCOL_VERSION
+        or record.get("model_snapshot") != model_provenance(model_key)
+        or record.get("dataset_snapshot") != dataset_provenance()
+        or int(record.get("batch_size_per_gpu", -1))
+        != DEFAULT_EVAL_BATCH_SIZE
+        or int(record.get("max_new_tokens", -1)) != MAX_NEW_TOKENS
+    ):
+        raise RuntimeError(f"Stale task-panel provenance: {model_key}/{method}/{task}")
+    if broad:
+        return "accuracy", float(record["scores"][task])
+    return metric_percentage(record["results"][task]["metrics"], PANEL_METRICS[task])
+
+
 def analyze() -> dict:
+    from experiments.revision_full.run import dataset_provenance, model_provenance
+
+    dataset_identity = dataset_provenance()
+    model_revisions = {
+        model_key: model_provenance(model_key)["resolved_revision"]
+        for model_key in MODEL_SPECS
+    }
     comparisons = []
     seed_summary = []
     for model_key, spec in MODEL_SPECS.items():
@@ -238,6 +340,9 @@ def analyze() -> dict:
                 "sg_vs_gptq_w6": sg_vs_w6,
                 "gptq_w5_vs_gptq_w4": w5_vs_w4,
                 "gptq_w6_vs_gptq_w4": w6_vs_w4,
+                "gptq_w4_relative_error_increase": relative_error_increase(
+                    fp16_acc, sg_vs_w4["a_accuracy"]
+                ),
                 "normalized_recovery": recovery,
             }
             comparisons.append(row)
@@ -385,7 +490,7 @@ def analyze() -> dict:
                     "random_max": max(random_accuracies),
                     "sg_percentile": percentile,
                     "empirical_one_sided_p": empirical_p,
-                    "claim_ready": len(random_accuracies) == RANDOM_ALLOCATIONS,
+                    "evidence_complete": len(random_accuracies) == RANDOM_ALLOCATIONS,
                 }
             else:
                 summary = {
@@ -396,9 +501,19 @@ def analyze() -> dict:
                     "required_random_allocations": RANDOM_ALLOCATIONS,
                     "completed_random_allocations": 0,
                     "missing_allocation_ids": missing,
-                    "claim_ready": False,
+                    "evidence_complete": False,
                 }
             random_controls.append(summary)
+
+    complete_random_controls = [
+        row for row in random_controls if row.get("empirical_one_sided_p") is not None
+    ]
+    if complete_random_controls:
+        corrected = holm_adjust(
+            [row["empirical_one_sided_p"] for row in complete_random_controls]
+        )
+        for row, value in zip(complete_random_controls, corrected):
+            row["empirical_one_sided_p_holm_family"] = value
 
     module_controls = []
     control_variants = [
@@ -411,8 +526,6 @@ def analyze() -> dict:
         "hessian_diag_matched",
     ]
     for model_key, spec in MODEL_SPECS.items():
-        if spec["role"] != "primary":
-            continue
         sg_method = method_id("sg_mmp", RANDOM_CALIB_SEED)
         try:
             sg = correctness(model_key, sg_method)
@@ -421,11 +534,87 @@ def analyze() -> dict:
         for variant in control_variants:
             method = method_id(variant, RANDOM_CALIB_SEED)
             metadata_path = (
-                OUT
-                / "states"
+                STATE_METADATA_DIR
                 / model_key
                 / f"calib_{RANDOM_CALIB_SEED}"
                 / f"{variant}.json"
+            )
+
+    task_controls = []
+    for model_key, spec in MODEL_SPECS.items():
+        methods = {
+            "fp16": "fp16",
+            "gptq_w4": method_id("gptq_w4", RANDOM_CALIB_SEED),
+            "sg_mmp": method_id("sg_mmp", RANDOM_CALIB_SEED),
+        }
+        task_points = []
+        canonical = {
+            name: 100 * sum(correctness(model_key, method).values()) / GSM8K_TEST_SIZE
+            for name, method in methods.items()
+        }
+        task_points.append(("gsm8k", "math", "generation", "exact_match", canonical))
+        format_values = {
+            name: 100
+            * sum(format_correctness(model_key, method).values())
+            / GSM8K_TEST_SIZE
+            for name, method in methods.items()
+        }
+        task_points.append(
+            ("gsm8k_mcq", "math", "multiple_choice", "accuracy", format_values)
+        )
+        for task in BROAD_TASKS:
+            values = {}
+            metric = None
+            for name, method in methods.items():
+                current_metric, value = task_point(
+                    model_key, method, task, broad=True
+                )
+                if metric is not None and current_metric != metric:
+                    raise RuntimeError(f"Metric drift for {model_key}/{task}")
+                metric = current_metric
+                values[name] = value
+            category = "math" if task == "mmlu_high_school_mathematics" else "non_math"
+            task_points.append((task, category, "multiple_choice", metric, values))
+        for task in EXTRA_TASKS:
+            values = {}
+            metric = None
+            for name, method in methods.items():
+                current_metric, value = task_point(
+                    model_key, method, task, broad=False
+                )
+                if metric is not None and current_metric != metric:
+                    raise RuntimeError(f"Metric drift for {model_key}/{task}")
+                metric = current_metric
+                values[name] = value
+            category = "math" if task != "truthfulqa_gen" else "non_math"
+            task_points.append((task, category, "generation", metric, values))
+
+        for task, category, output_format, metric, values in task_points:
+            denominator = values["fp16"] - values["gptq_w4"]
+            task_controls.append(
+                {
+                    "model_key": model_key,
+                    "model": spec["display_name"],
+                    "task": task,
+                    "category": category,
+                    "output_format": output_format,
+                    "metric": metric,
+                    "calibration_seed": RANDOM_CALIB_SEED,
+                    "fp16": values["fp16"],
+                    "gptq_w4": values["gptq_w4"],
+                    "sg_mmp": values["sg_mmp"],
+                    "gptq_w4_absolute_degradation": values["fp16"]
+                    - values["gptq_w4"],
+                    "gptq_w4_relative_error_increase": relative_error_increase(
+                        values["fp16"], values["gptq_w4"]
+                    ),
+                    "sg_minus_gptq_w4": values["sg_mmp"] - values["gptq_w4"],
+                    "normalized_recovery": (
+                        (values["sg_mmp"] - values["gptq_w4"]) / denominator
+                        if denominator > 0
+                        else None
+                    ),
+                }
             )
             try:
                 control = correctness(model_key, method)
@@ -445,12 +634,23 @@ def analyze() -> dict:
                     "control_vs_sg": paired(control, sg),
                 }
             )
+    if module_controls:
+        corrected = holm_adjust(
+            [row["control_vs_sg"]["mcnemar_p_exact"] for row in module_controls]
+        )
+        for row, value in zip(module_controls, corrected):
+            row["control_vs_sg"]["mcnemar_p_holm_family"] = value
 
     external_baselines = []
     registry = OUT / "external_baselines"
-    for metadata_path in sorted(registry.glob("*.json")):
-        if "__config" in metadata_path.name:
-            continue
+    external_metadata_paths = [
+        path for path in sorted(registry.glob("*.json")) if "__config" not in path.name
+    ]
+    if external_metadata_paths:
+        from experiments.revision_full.external_baselines import validate
+
+        validate()
+    for metadata_path in external_metadata_paths:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         model_key = metadata["model_key"]
         method = metadata["method_id"]
@@ -463,8 +663,22 @@ def analyze() -> dict:
                 "external_vs_sg": paired(external, sg),
             }
         )
+    if external_baselines:
+        corrected = holm_adjust(
+            [row["external_vs_sg"]["mcnemar_p_exact"] for row in external_baselines]
+        )
+        for row, value in zip(external_baselines, corrected):
+            row["external_vs_sg"]["mcnemar_p_holm_family"] = value
 
     result = {
+        "protocol_version": PROTOCOL_VERSION,
+        "dataset_manifest_sha256": dataset_identity["manifest_sha256"],
+        "model_revisions": model_revisions,
+        "execution": {
+            "eval_batch_size_per_gpu": DEFAULT_EVAL_BATCH_SIZE,
+            "format_batch_size_per_gpu": DEFAULT_FORMAT_BATCH_SIZE,
+            "max_new_tokens": MAX_NEW_TOKENS,
+        },
         "test_protocol": "complete official GSM8K test set",
         "n": GSM8K_TEST_SIZE,
         "comparisons": comparisons,
@@ -472,6 +686,7 @@ def analyze() -> dict:
         "same_item_format_controls": format_controls,
         "random_same_budget_controls": random_controls,
         "module_placement_controls": module_controls,
+        "cross_task_format_controls": task_controls,
         "external_baselines": external_baselines,
         "run_level_inference": "Two-stage bootstrap over three calibration seeds and paired examples.",
     }
@@ -483,20 +698,25 @@ def analyze() -> dict:
         "",
         f"Every row uses all {GSM8K_TEST_SIZE} official test examples. Layer selection used GSM8K train only.",
         "",
-        "| Model | Calib seed | W4 | W5 | W6 | SG-MMP | SG-W4 | 95% paired CI | McNemar Holm p | Recovery |",
-        "|---|---:|---:|---:|---:|---:|---:|---|---:|---:|",
+        "| Model | Calib seed | W4 | W5 | W6 | SG-MMP | SG-W4 | 95% paired CI | McNemar Holm p | W4 rel. error increase | Recovery |",
+        "|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|",
     ]
     for row in comparisons:
         comp = row["sg_vs_gptq_w4"]
         recovery = row["normalized_recovery"]
         recovery_text = "NA" if recovery is None else f"{100 * recovery:.1f}%"
+        relative_error = row["gptq_w4_relative_error_increase"]
+        relative_error_text = (
+            "NA" if relative_error is None else f"{100 * relative_error:.1f}%"
+        )
         lines.append(
             f"| {row['model']} | {row['calibration_seed']} | {comp['a_accuracy']:.2f} | "
             f"{row['sg_vs_gptq_w5']['a_accuracy']:.2f} | "
             f"{row['sg_vs_gptq_w6']['a_accuracy']:.2f} | "
             f"{comp['b_accuracy']:.2f} | {comp['delta']:+.2f} | "
             f"[{comp['paired_bootstrap_ci95'][0]:+.2f}, {comp['paired_bootstrap_ci95'][1]:+.2f}] | "
-            f"{comp['mcnemar_p_holm_within_family']:.4g} | {recovery_text} |"
+            f"{comp['mcnemar_p_holm_within_family']:.4g} | "
+            f"{relative_error_text} | {recovery_text} |"
         )
     lines.extend(
         [
@@ -523,7 +743,7 @@ def analyze() -> dict:
             "",
             "## Same-budget random allocation audit",
             "",
-            "| Model | Allocation | Completed | SG accuracy | Random mean | SG percentile | Empirical p | Claim ready |",
+            "| Model | Allocation | Completed | SG accuracy | Random mean | SG percentile | Holm empirical p | Evidence complete |",
             "|---|---|---:|---:|---:|---:|---:|---|",
         ]
     )
@@ -532,7 +752,7 @@ def analyze() -> dict:
             lines.append(
                 f"| {row['model']} | {row['allocation_kind']} | {row['completed_random_allocations']}/{row['required_random_allocations']} | "
                 f"{row['sg_accuracy']:.2f} | {row['random_mean']:.2f} | {row['sg_percentile']:.1f} | "
-                f"{row['empirical_one_sided_p']:.4f} | {'yes' if row['claim_ready'] else 'no'} |"
+                f"{row['empirical_one_sided_p_holm_family']:.4f} | {'yes' if row['evidence_complete'] else 'no'} |"
             )
         else:
             lines.append(
@@ -543,8 +763,8 @@ def analyze() -> dict:
         [
             "## External matched-budget baselines",
             "",
-            "| Model | Method | Avg bits | SG minus external | 95% paired CI |",
-            "|---|---|---:|---:|---|",
+            "| Model | Method | Avg bits | SG minus external | 95% paired CI | Holm p |",
+            "|---|---|---:|---:|---|---:|",
         ]
     )
     for row in external_baselines:
@@ -552,10 +772,11 @@ def analyze() -> dict:
         lines.append(
             f"| {row['model']} | {row['method']} | {row['parameter_weighted_average_bits']:.3f} | "
             f"{comp['delta']:+.2f} | "
-            f"[{comp['paired_bootstrap_ci95'][0]:+.2f}, {comp['paired_bootstrap_ci95'][1]:+.2f}] |"
+            f"[{comp['paired_bootstrap_ci95'][0]:+.2f}, {comp['paired_bootstrap_ci95'][1]:+.2f}] | "
+            f"{comp['mcnemar_p_holm_family']:.4g} |"
         )
     if not external_baselines:
-        lines.append("| Not registered | NA | NA | NA | NA |")
+        lines.append("| Not registered | NA | NA | NA | NA | NA |")
     lines.append("")
     lines.extend(
         [
@@ -563,8 +784,8 @@ def analyze() -> dict:
             "",
             "Pure-family points are reported at their actual bit budgets. Role-priority and Hessian controls are matched to SG-MMP.",
             "",
-            "| Model | Variant | Avg bits | SG minus control | 95% paired CI |",
-            "|---|---|---:|---:|---|",
+            "| Model | Variant | Avg bits | SG minus control | 95% paired CI | Holm p |",
+            "|---|---|---:|---:|---|---:|",
         ]
     )
     for row in module_controls:
@@ -572,7 +793,8 @@ def analyze() -> dict:
         lines.append(
             f"| {row['model']} | {row['variant']} | {row['parameter_weighted_average_bits']:.3f} | "
             f"{comp['delta']:+.2f} | "
-            f"[{comp['paired_bootstrap_ci95'][0]:+.2f}, {comp['paired_bootstrap_ci95'][1]:+.2f}] |"
+            f"[{comp['paired_bootstrap_ci95'][0]:+.2f}, {comp['paired_bootstrap_ci95'][1]:+.2f}] | "
+            f"{comp['mcnemar_p_holm_family']:.4g} |"
         )
     lines.append("")
     lines.extend(
@@ -594,6 +816,27 @@ def analyze() -> dict:
         )
     if not format_controls:
         lines.append("| Not yet complete | NA | NA | NA | NA | NA |")
+    lines.append("")
+    lines.extend(
+        [
+            "## Cross-task and format-normalized results",
+            "",
+            "Relative error increase and normalized recovery are descriptive for transfer tasks; paired inference is reserved for the locked same-item GSM8K comparisons.",
+            "",
+            "| Model | Task | Category | Format | Metric | FP16 | W4 | SG-MMP | W4 rel. error increase | Recovery |",
+            "|---|---|---|---|---|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in task_controls:
+        relative_error = row["gptq_w4_relative_error_increase"]
+        recovery = row["normalized_recovery"]
+        lines.append(
+            f"| {row['model']} | {row['task']} | {row['category']} | "
+            f"{row['output_format']} | {row['metric']} | {row['fp16']:.2f} | "
+            f"{row['gptq_w4']:.2f} | {row['sg_mmp']:.2f} | "
+            f"{'NA' if relative_error is None else f'{100 * relative_error:.1f}%'} | "
+            f"{'NA' if recovery is None else f'{100 * recovery:.1f}%'} |"
+        )
     lines.append("")
     (OUT / "analysis_full.md").write_text("\n".join(lines), encoding="utf-8")
     return result
