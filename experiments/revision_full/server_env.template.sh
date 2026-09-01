@@ -9,6 +9,10 @@ export HF_HUB_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export REVISION_FULL_EVAL_BATCH_SIZE=4
 export REVISION_FULL_FORMAT_BATCH_SIZE=2
+# A 32-GiB host may run two GPU workers, but only one activation-heavy
+# screen/precision builder at a time. Evaluation remains concurrent.
+export REVISION_FULL_MAX_CONCURRENT_RAM_BUILDERS=1
+export REVISION_FULL_MIN_AVAILABLE_RAM_GIB=24
 export PYTHONUNBUFFERED=1
 
 # Uncomment only when a sufficiently large, durable-for-the-job scratch path

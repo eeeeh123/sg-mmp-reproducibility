@@ -15,6 +15,7 @@ import random
 import statistics
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -39,7 +40,9 @@ from experiments.revision_full.protocol import (
     EXTRA_TASKS,
     GSM8K_TEST_SIZE,
     GROUP_SIZE,
+    MAX_CONCURRENT_RAM_BUILDERS,
     MAX_NEW_TOKENS,
+    MIN_AVAILABLE_RAM_GIB,
     MODEL_SPECS,
     OUT,
     PROTOCOL_VERSION,
@@ -231,6 +234,65 @@ def status(stage: str, **extra) -> None:
     print("[status]", json.dumps(payload, ensure_ascii=False), flush=True)
     suffix = f"__{extra['model']}" if extra.get("model") in MODEL_SPECS else ""
     write_json(OUT / f"status{suffix}.json", payload)
+
+
+def system_available_ram_gib() -> float | None:
+    """Return Linux MemAvailable without treating swap as usable experiment RAM."""
+    meminfo = Path("/proc/meminfo")
+    if not meminfo.exists():
+        return None
+    for line in meminfo.read_text(encoding="utf-8").splitlines():
+        if line.startswith("MemAvailable:"):
+            return int(line.split()[1]) / 1024**2
+    return None
+
+
+@contextmanager
+def ram_builder_slot(stage: str, model_key: str, calib_seed: int):
+    """Serialize activation-heavy state builders across the two GPU workers."""
+    if MAX_CONCURRENT_RAM_BUILDERS != 1:
+        yield
+        return
+    if os.name != "posix":
+        raise RuntimeError(
+            "The single RAM-builder mode requires a POSIX server with fcntl locking"
+        )
+
+    import fcntl
+
+    lock_path = OUT / "ram_builder.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as stream:
+        status(
+            "ram_builder_wait",
+            model=model_key,
+            calib_seed=calib_seed,
+            builder_stage=stage,
+        )
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        try:
+            available = system_available_ram_gib()
+            if (
+                available is not None
+                and available < MIN_AVAILABLE_RAM_GIB
+            ):
+                raise RuntimeError(
+                    f"Only {available:.1f} GiB system RAM is available before {stage}; "
+                    f"at least {MIN_AVAILABLE_RAM_GIB:.1f} GiB is required. "
+                    "Stop competing RAM-heavy jobs and resume; swap is not counted."
+                )
+            status(
+                "ram_builder_acquired",
+                model=model_key,
+                calib_seed=calib_seed,
+                builder_stage=stage,
+                available_ram_gib=(
+                    None if available is None else round(available, 1)
+                ),
+            )
+            yield
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def get_dataset():
@@ -498,48 +560,54 @@ def build_screen_bank(
         )
         return path
 
-    configure_determinism(calib_seed)
-    model, tokenizer = load_model_tokenizer(model_key)
-    calibration = frozen_wikitext_calibration(tokenizer, calib_seed)
-    state = quantize_model_gptq(
-        model, calibration, bits=4, group_size=GROUP_SIZE
-    )
-    save_torch_atomic(state, path)
-    screened_layers = sorted(
-        {
-            int(row["layer"])
-            for row in module_rows(model)
-        }
-    )
-    write_json(
-        metadata_path,
-        {
-            "protocol_version": PROTOCOL_VERSION,
-            "model_key": model_key,
-            "variant": variant,
-            "split_id": split_id,
-            "screen_seed": int(split["seed"]),
-            "calibration_seed": calib_seed,
-            "quantizer": "GPTQ-W4",
-            "group_size": GROUP_SIZE,
-            "calibration_samples": CALIB_SAMPLES,
-            "calibration_length": CALIB_LENGTH,
-            "screened_layers": screened_layers,
-            "state_entries": len(state),
-            "bytes": path.stat().st_size,
-            "model_snapshot": model_provenance(model_key),
-            "dataset_snapshot": dataset_provenance(),
-        },
-    )
-    del state, calibration, model, tokenizer
-    cleanup_gpu()
-    status(
-        "screen_bank_saved",
-        model=model_key,
-        split_id=split_id,
-        calib_seed=calib_seed,
-        path=str(path),
-    )
+    with ram_builder_slot("build-screen-bank", model_key, calib_seed):
+        if path.exists() and not force:
+            require_current_state_metadata(
+                metadata_path, path, model_key, calib_seed, variant
+            )
+            return path
+        configure_determinism(calib_seed)
+        model, tokenizer = load_model_tokenizer(model_key)
+        calibration = frozen_wikitext_calibration(tokenizer, calib_seed)
+        state = quantize_model_gptq(
+            model, calibration, bits=4, group_size=GROUP_SIZE
+        )
+        save_torch_atomic(state, path)
+        screened_layers = sorted(
+            {
+                int(row["layer"])
+                for row in module_rows(model)
+            }
+        )
+        write_json(
+            metadata_path,
+            {
+                "protocol_version": PROTOCOL_VERSION,
+                "model_key": model_key,
+                "variant": variant,
+                "split_id": split_id,
+                "screen_seed": int(split["seed"]),
+                "calibration_seed": calib_seed,
+                "quantizer": "GPTQ-W4",
+                "group_size": GROUP_SIZE,
+                "calibration_samples": CALIB_SAMPLES,
+                "calibration_length": CALIB_LENGTH,
+                "screened_layers": screened_layers,
+                "state_entries": len(state),
+                "bytes": path.stat().st_size,
+                "model_snapshot": model_provenance(model_key),
+                "dataset_snapshot": dataset_provenance(),
+            },
+        )
+        del state, calibration, model, tokenizer
+        cleanup_gpu()
+        status(
+            "screen_bank_saved",
+            model=model_key,
+            split_id=split_id,
+            calib_seed=calib_seed,
+            path=str(path),
+        )
     return path
 
 
@@ -1015,43 +1083,54 @@ def build_bank(model_key: str, calib_seed: int, force: bool) -> Path:
             reason="all dependent evidence is complete",
         )
         return path
-    configure_determinism(calib_seed)
-    model, tokenizer = load_model_tokenizer(model_key)
-    calibration = frozen_wikitext_calibration(tokenizer, calib_seed)
-    bank = quantize_model_precision_bank(
-        model,
-        calibration,
-        bits_w4=4,
-        group_size=GROUP_SIZE,
-        uniform_bits=(5, 6),
-        max_calib_tokens=CALIB_HESSIAN_TOKENS,
-    )
-    save_torch_atomic(bank, path)
-    write_json(
-        metadata_path,
-        {
-            "protocol_version": PROTOCOL_VERSION,
-            "model_key": model_key,
-            "variant": "precision_bank",
-            "calibration_dataset": "wikitext train",
-            "calibration_seed": calib_seed,
-            "calibration_samples": CALIB_SAMPLES,
-            "calibration_length": CALIB_LENGTH,
-            "calibration_construction": "packed exact-length segments; no synthetic zero padding",
-            "hessian_activation_tokens_per_module": CALIB_HESSIAN_TOKENS,
-            "hessian_sample_balancing": "all calibration samples contribute",
-            "group_size": GROUP_SIZE,
-            "precision_entries": [4, 5, 6, 8],
-            "modules": len(bank),
-            "selection_score": "calibration-weighted diagonal-Hessian reconstruction NMSE",
-            "bytes": path.stat().st_size,
-            "model_snapshot": model_provenance(model_key),
-            "dataset_snapshot": dataset_provenance(),
-        },
-    )
-    del bank, calibration, model, tokenizer
-    cleanup_gpu()
-    status("precision_bank_saved", model=model_key, calib_seed=calib_seed, path=str(path))
+    with ram_builder_slot("build-bank", model_key, calib_seed):
+        if path.exists() and not force:
+            require_current_state_metadata(
+                metadata_path, path, model_key, calib_seed, "precision_bank"
+            )
+            return path
+        configure_determinism(calib_seed)
+        model, tokenizer = load_model_tokenizer(model_key)
+        calibration = frozen_wikitext_calibration(tokenizer, calib_seed)
+        bank = quantize_model_precision_bank(
+            model,
+            calibration,
+            bits_w4=4,
+            group_size=GROUP_SIZE,
+            uniform_bits=(5, 6),
+            max_calib_tokens=CALIB_HESSIAN_TOKENS,
+        )
+        save_torch_atomic(bank, path)
+        write_json(
+            metadata_path,
+            {
+                "protocol_version": PROTOCOL_VERSION,
+                "model_key": model_key,
+                "variant": "precision_bank",
+                "calibration_dataset": "wikitext train",
+                "calibration_seed": calib_seed,
+                "calibration_samples": CALIB_SAMPLES,
+                "calibration_length": CALIB_LENGTH,
+                "calibration_construction": "packed exact-length segments; no synthetic zero padding",
+                "hessian_activation_tokens_per_module": CALIB_HESSIAN_TOKENS,
+                "hessian_sample_balancing": "all calibration samples contribute",
+                "group_size": GROUP_SIZE,
+                "precision_entries": [4, 5, 6, 8],
+                "modules": len(bank),
+                "selection_score": "calibration-weighted diagonal-Hessian reconstruction NMSE",
+                "bytes": path.stat().st_size,
+                "model_snapshot": model_provenance(model_key),
+                "dataset_snapshot": dataset_provenance(),
+            },
+        )
+        del bank, calibration, model, tokenizer
+        cleanup_gpu()
+        status(
+            "precision_bank_saved",
+            model=model_key,
+            calib_seed=calib_seed,
+            path=str(path),
+        )
     return path
 
 

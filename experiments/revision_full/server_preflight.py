@@ -17,6 +17,8 @@ sys.path.insert(0, ".")
 
 from experiments.revision_full.protocol import (
     GROUP_SIZE,
+    MAX_CONCURRENT_RAM_BUILDERS,
+    MIN_AVAILABLE_RAM_GIB,
     MODEL_SPECS,
     OUT,
     ROOT,
@@ -48,8 +50,6 @@ MIN_GPU_GIB = 16
 RECOMMENDED_GPU_GIB = 23
 MIN_PERSISTENT_FREE_GIB = 30
 RECOMMENDED_PERSISTENT_FREE_GIB = 60
-MIN_RAM_GIB = 60
-RECOMMENDED_RAM_GIB = 90
 
 
 def storage_thresholds(
@@ -67,6 +67,31 @@ def storage_thresholds(
         "minimum_shared_free_gib": MIN_PERSISTENT_FREE_GIB + minimum_state,
         "recommended_shared_free_gib": RECOMMENDED_PERSISTENT_FREE_GIB
         + recommended_state,
+    }
+
+
+def ram_thresholds(
+    concurrent_models: int, max_concurrent_ram_builders: int
+) -> dict:
+    """Capacity gates for full-concurrency and low-RAM staggered execution."""
+    if max_concurrent_ram_builders not in {1, concurrent_models}:
+        raise ValueError(
+            "max_concurrent_ram_builders must be 1 or equal concurrent_models"
+        )
+    if max_concurrent_ram_builders == 1:
+        return {
+            "mode": "serialized_ram_builders_with_parallel_gpu_evaluation",
+            "minimum_total_gib": max(30, 22 + 4 * concurrent_models),
+            "recommended_total_gib": max(48, 32 + 8 * concurrent_models),
+            "minimum_available_gib": max(24, 16 + 4 * concurrent_models),
+            "recommended_available_gib": max(32, 24 + 4 * concurrent_models),
+        }
+    return {
+        "mode": "concurrent_ram_builders",
+        "minimum_total_gib": max(60, 32 * concurrent_models),
+        "recommended_total_gib": max(90, 48 * concurrent_models),
+        "minimum_available_gib": max(48, 24 * concurrent_models),
+        "recommended_available_gib": max(72, 36 * concurrent_models),
     }
 
 
@@ -124,25 +149,36 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def system_ram_gib() -> float | None:
+def system_memory_gib() -> tuple[float | None, float | None]:
     meminfo = Path("/proc/meminfo")
     if not meminfo.exists():
-        return None
+        return None, None
+    values = {}
     for line in meminfo.read_text(encoding="utf-8").splitlines():
-        if line.startswith("MemTotal:"):
-            return int(line.split()[1]) / 1024**2
-    return None
+        key = line.split(":", 1)[0]
+        if key in {"MemTotal", "MemAvailable"}:
+            values[key] = int(line.split()[1]) / 1024**2
+    return values.get("MemTotal"), values.get("MemAvailable")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--expected-gpus", type=int, default=1)
     parser.add_argument("--concurrent-models", type=int, default=1)
+    parser.add_argument(
+        "--max-concurrent-ram-builders",
+        type=int,
+        default=MAX_CONCURRENT_RAM_BUILDERS,
+    )
     args = parser.parse_args()
     if not 1 <= args.concurrent_models <= len(MODEL_SPECS):
         raise SystemExit("--concurrent-models must be between 1 and 4")
     if args.expected_gpus < args.concurrent_models:
         raise SystemExit("--expected-gpus must be at least --concurrent-models")
+    if args.max_concurrent_ram_builders not in {1, args.concurrent_models}:
+        raise SystemExit(
+            "--max-concurrent-ram-builders must be 1 or equal --concurrent-models"
+        )
     errors: list[str] = []
     warnings: list[str] = []
     packages = {}
@@ -319,9 +355,12 @@ def main() -> None:
                 f"{recommended_state_free_gib} GiB is recommended"
             )
 
-    ram_gib = system_ram_gib()
-    minimum_ram_gib = max(MIN_RAM_GIB, 32 * args.concurrent_models)
-    recommended_ram_gib = max(RECOMMENDED_RAM_GIB, 48 * args.concurrent_models)
+    ram_gib, available_ram_gib = system_memory_gib()
+    ram = ram_thresholds(
+        args.concurrent_models, args.max_concurrent_ram_builders
+    )
+    minimum_ram_gib = ram["minimum_total_gib"]
+    recommended_ram_gib = ram["recommended_total_gib"]
     if ram_gib is not None and ram_gib < minimum_ram_gib:
         errors.append(
             f"only {ram_gib:.1f} GiB system RAM; at least {minimum_ram_gib} GiB is required"
@@ -329,6 +368,31 @@ def main() -> None:
     elif ram_gib is not None and ram_gib < recommended_ram_gib:
         warnings.append(
             f"{ram_gib:.1f} GiB RAM; {recommended_ram_gib} GiB is recommended"
+        )
+    if (
+        available_ram_gib is not None
+        and available_ram_gib < ram["minimum_available_gib"]
+    ):
+        errors.append(
+            f"only {available_ram_gib:.1f} GiB system RAM is currently available; "
+            f"at least {ram['minimum_available_gib']} GiB is required before launch"
+        )
+    elif (
+        available_ram_gib is not None
+        and available_ram_gib < ram["recommended_available_gib"]
+    ):
+        warnings.append(
+            f"{available_ram_gib:.1f} GiB RAM is currently available; "
+            f"{ram['recommended_available_gib']} GiB is recommended"
+        )
+    if args.max_concurrent_ram_builders == 1:
+        if MIN_AVAILABLE_RAM_GIB < ram["minimum_available_gib"]:
+            errors.append(
+                "REVISION_FULL_MIN_AVAILABLE_RAM_GIB is below the preflight safety floor"
+            )
+        warnings.append(
+            "low-RAM mode is active: activation-heavy screen/precision builders are "
+            "serialized, while GPU evaluation remains parallel"
         )
 
     errors.extend(preflight_errors())
@@ -339,6 +403,9 @@ def main() -> None:
             "python": sys.version,
             "cpu_count": os.cpu_count(),
             "ram_gib": None if ram_gib is None else round(ram_gib, 1),
+            "available_ram_gib": (
+                None if available_ram_gib is None else round(available_ram_gib, 1)
+            ),
             "persistent_free_disk_gib": round(persistent_free_gib, 1),
             "state_free_disk_gib": round(state_free_gib, 1),
             "state_dir": str(STATE_DIR),
@@ -348,6 +415,8 @@ def main() -> None:
             ),
             "expected_gpus": args.expected_gpus,
             "concurrent_models": args.concurrent_models,
+            "ram_execution_mode": ram["mode"],
+            "max_concurrent_ram_builders": args.max_concurrent_ram_builders,
             "concurrent_model_state_peaks_gib": [
                 round(value, 2) for value in concurrent_peaks
             ],
@@ -359,6 +428,8 @@ def main() -> None:
             ],
             "minimum_ram_gib": minimum_ram_gib,
             "recommended_ram_gib": recommended_ram_gib,
+            "minimum_available_ram_gib": ram["minimum_available_gib"],
+            "recommended_available_ram_gib": ram["recommended_available_gib"],
         },
         "gpus": gpu_rows,
         "packages": packages,

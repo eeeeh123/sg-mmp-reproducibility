@@ -47,11 +47,21 @@ DEFAULT_EVAL_BATCH_SIZE = int(os.environ.get("REVISION_FULL_EVAL_BATCH_SIZE", "4
 DEFAULT_FORMAT_BATCH_SIZE = int(
     os.environ.get("REVISION_FULL_FORMAT_BATCH_SIZE", "2")
 )
+MAX_CONCURRENT_RAM_BUILDERS = int(
+    os.environ.get("REVISION_FULL_MAX_CONCURRENT_RAM_BUILDERS", "1")
+)
+MIN_AVAILABLE_RAM_GIB = float(
+    os.environ.get("REVISION_FULL_MIN_AVAILABLE_RAM_GIB", "24")
+)
 MAX_NEW_TOKENS = 256
 FEWSHOT_TRAIN_INDICES = tuple(range(5))
 
 if DEFAULT_EVAL_BATCH_SIZE <= 0 or DEFAULT_FORMAT_BATCH_SIZE <= 0:
     raise ValueError("Evaluation batch sizes must be positive")
+if MAX_CONCURRENT_RAM_BUILDERS <= 0:
+    raise ValueError("REVISION_FULL_MAX_CONCURRENT_RAM_BUILDERS must be positive")
+if MIN_AVAILABLE_RAM_GIB < 0:
+    raise ValueError("REVISION_FULL_MIN_AVAILABLE_RAM_GIB cannot be negative")
 
 BROAD_TASKS = (
     "arc_challenge",

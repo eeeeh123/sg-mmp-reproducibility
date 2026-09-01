@@ -16,7 +16,7 @@ from experiments.revision_full.protocol import (
     scored_budget_match,
     select_layers_under_budget,
 )
-from experiments.revision_full.server_preflight import storage_thresholds
+from experiments.revision_full.server_preflight import ram_thresholds, storage_thresholds
 from experiments.revision_full.download_core_datasets import snapshot_sha256
 from experiments.revision_full.download_models import stable_model_record
 
@@ -127,6 +127,18 @@ class ProtocolTests(unittest.TestCase):
         self.assertAlmostEqual(thresholds["estimated_state_peak_gib"], 17.78)
         self.assertEqual(thresholds["minimum_shared_free_gib"], 55)
         self.assertEqual(thresholds["recommended_shared_free_gib"], 92)
+
+    def test_two_gpu_low_ram_mode_serializes_only_builders(self):
+        low_ram = ram_thresholds(2, 1)
+        self.assertEqual(
+            low_ram["mode"],
+            "serialized_ram_builders_with_parallel_gpu_evaluation",
+        )
+        self.assertEqual(low_ram["minimum_total_gib"], 30)
+        self.assertEqual(low_ram["minimum_available_gib"], 24)
+        full_concurrency = ram_thresholds(2, 2)
+        self.assertEqual(full_concurrency["minimum_total_gib"], 64)
+        self.assertEqual(full_concurrency["minimum_available_gib"], 48)
 
     def test_dataset_identity_ignores_cache_path_and_creation_time(self):
         def manifest(path, created):

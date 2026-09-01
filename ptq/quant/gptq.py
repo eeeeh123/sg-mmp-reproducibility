@@ -91,9 +91,11 @@ def collect_linear_inputs(
 
     merged: Dict[str, torch.Tensor] = {}
     for name, _ in linear_layers:
-        if not collected[name]:
+        parts = collected.pop(name)
+        if not parts:
             raise RuntimeError(f"No calibration activations captured for {name}")
-        merged[name] = torch.cat(collected[name], dim=0)[:max_tokens]
+        merged[name] = torch.cat(parts, dim=0)[:max_tokens]
+        del parts
         if merged[name].shape[0] != max_tokens:
             raise RuntimeError(
                 f"Captured {merged[name].shape[0]}/{max_tokens} tokens for {name}"

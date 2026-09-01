@@ -13,11 +13,11 @@ The frozen plan contains 522 commands, including 100 fail-closed state/bank/scre
 - 12 broad panels, 12 generative transfer panels, 12 precision-bank builds;
 - a 200-item teacher-forced diagnostic at every Qwen-0.5B layer for block, attention, and MLP interventions.
 
-With two 24-GiB RTX 3090 cards, the internal core is expected to take roughly 3–7 continuous days. This is a planning range, not a guarantee; actual prompt lengths, generated lengths, host RAM, shared-disk speed, and quantization kernels dominate. Use the first screen and precision-bank timings to update the estimate. Official TaCQ/HAWQ-V2 adaptation is additional work.
+With two 24-GiB RTX 3090 cards, the internal core is expected to take roughly 3–7 continuous days. This is a planning range, not a guarantee; actual prompt lengths, generated lengths, host RAM, shared-disk speed, and quantization kernels dominate. The 32-GiB mode still runs two single-GPU workers, but serializes activation-heavy screen/precision builders. Evaluation can remain concurrent, so it should retain a material dual-GPU speedup, although not a full 2x speedup. Use the first screen and precision-bank timings to update the estimate. Official TaCQ/HAWQ-V2 adaptation is additional work.
 
 For two concurrent model processes, the estimated active state peak is 17.78 GiB. On one shared filesystem the code requires about 55 GiB free and recommends about 92 GiB free. These are **free-space** values after the Python environment, four source checkpoints (about 11.9 GiB), and dataset caches exist. A 100-GiB total quota may therefore be inadequate; trust the measured preflight, not the quota label.
 
-Recommended minimum host: two RTX 3090 24 GiB, 64 GiB system RAM (96 GiB preferred), and at least 55 GiB actually free after staging. If only 50-something GiB is free, do not start two processes unless preflight passes. A separate scratch filesystem can hold `REVISION_FULL_STATE_DIR`, but an interrupted scratch state may need reconstruction.
+System RAM and disk free space are independent capacities: for example, `31 GiB` in `free -h` is RAM, while `103 GiB available` in `df -h /data` is disk. GPU VRAM and swap do not increase system RAM. Full concurrent building still needs at least 64 GiB RAM (96 GiB preferred). The guarded low-RAM schedule supports two GPU workers on a 32-GiB host only when total RAM is at least 30 GiB, at least 24 GiB is available before launch/build, and `REVISION_FULL_MAX_CONCURRENT_RAM_BUILDERS=1`. A 48-GiB-or-larger host remains preferable. If preflight reports `ready: false`, do not bypass its gate.
 
 ## 1. Clone source and create the environment
 
@@ -74,6 +74,8 @@ Start conservatively at generation batch 4 per process and MCQ item batch 2 per 
 ```bash
 export REVISION_FULL_EVAL_BATCH_SIZE=4
 export REVISION_FULL_FORMAT_BATCH_SIZE=2
+export REVISION_FULL_MAX_CONCURRENT_RAM_BUILDERS=1
+export REVISION_FULL_MIN_AVAILABLE_RAM_GIB=24
 cp experiments/revision_full/server_env.template.sh server_env.sh
 ```
 
@@ -97,18 +99,18 @@ python experiments/revision_full/format_control.py --prepare-only --force
 python experiments/revision_full/server_preflight.py --expected-gpus 2 --concurrent-models 2
 ```
 
-The preflight checks both visible GPUs, package compatibility, system RAM, free space on persistent/state filesystems, model revisions and hashes, every dataset cache hash, offline mode, the v4 protocol lock, full-test size, batch settings, and format manifest. Do not launch the matrix unless the final JSON contains `"ready": true`.
+The preflight checks both visible GPUs, package compatibility, total and currently available system RAM, free space on persistent/state filesystems, model revisions and hashes, every dataset cache hash, offline mode, the v4 protocol lock, full-test size, batch settings, and format manifest. In low-RAM mode it must report `serialized_ram_builders_with_parallel_gpu_evaluation`. Do not launch the matrix unless the final JSON contains `"ready": true`.
 
 Hashing all weight and dataset files reads several gigabytes once and may take minutes on a shared disk. That is intentional: it finds corruption or a wrong cache before multi-day computation.
 
-Before starting the long shards, run the first formal screen-state build for the two largest state estimates, one command per GPU/terminal:
+Before starting the long shards, run the first formal screen-state build for the two largest state estimates, one command per GPU/terminal, with `server_env.sh` sourced in both terminals:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python experiments/revision_full/run.py build-screen-bank --model gemma2 --split-id 0 --calib-seed 41
 CUDA_VISIBLE_DEVICES=1 python experiments/revision_full/run.py build-screen-bank --model smollm --split-id 0 --calib-seed 41
 ```
 
-This validates real calibration, quantization, CUDA, RAM, and concurrent state writes before hundreds of evaluations. The later shards validate and reuse these exact formal states, so the pilot is not discarded work. If it fails, no accuracy result exists yet; fix the environment/code and rebuild without invalidating other evidence.
+The RAM-builder lock intentionally lets only one of these commands build at a time; the other prints `ram_builder_wait` and continues after the first releases the lock. This validates real calibration, quantization, CUDA, RAM, the lock, and state writes before hundreds of evaluations. The later shards validate and reuse these exact formal states, so the pilot is not discarded work. The first full precision-bank build remains the largest RAM validation; its runtime guard refuses to start if `MemAvailable` is below 24 GiB. If it fails, already completed, provenance-valid screen evidence remains resumable.
 
 ## 5. Generate two non-overlapping model shards
 
@@ -127,12 +129,13 @@ tmux new-session -d -s revision_gpu0 "cd /data/$USER/ptq-benchmark && source .ve
 tmux new-session -d -s revision_gpu1 "cd /data/$USER/ptq-benchmark && source .venv/bin/activate && source server_env.sh && CUDA_VISIBLE_DEVICES=1 bash server_plans/gpu1.sh 2>&1 | tee logs/gpu1.log"
 ```
 
-Each process sees its physical card as `cuda:0`. Model-specific status, runtime summaries, samples, state metadata, and cleanup receipts use separate paths. Dataset/model caches are shared read-only during formal execution.
+Each process sees its physical card as `cuda:0`. Model-specific status, runtime summaries, samples, state metadata, and cleanup receipts use separate paths. Dataset/model caches are shared read-only during formal execution. Both GPUs can evaluate simultaneously; only `build-screen-bank` and `build-bank`, which retain calibration activations and growing quantized states in host RAM, are mutually exclusive.
 
 Monitor without modifying outputs:
 
 ```bash
 nvidia-smi
+free -h
 tmux ls
 tail -f logs/gpu0.log
 df -h /data/$USER

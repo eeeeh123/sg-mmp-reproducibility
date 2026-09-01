@@ -27,7 +27,7 @@ python experiments/revision_full/format_control.py --prepare-only --force
 python experiments/revision_full/server_preflight.py --expected-gpus 2 --concurrent-models 2
 ```
 
-Preflight also verifies immutable checkpoint/cache hashes, both GPUs, offline mode, RAM, disk, and the batch/token lock. Run the four train-only smoke tests in `SERVER_MIGRATION.md` before creating the protocol lock.
+Preflight also verifies immutable checkpoint/cache hashes, both GPUs, offline mode, RAM, disk, and the batch/token lock. A 32-GiB two-GPU host must use `REVISION_FULL_MAX_CONCURRENT_RAM_BUILDERS=1`: high-host-RAM screen/precision builders are serialized by a cross-process lock, while the two GPU workers may still evaluate concurrently. Run the four train-only smoke tests in `SERVER_MIGRATION.md` before creating the protocol lock.
 
 ## Server run order
 
