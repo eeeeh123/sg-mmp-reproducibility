@@ -49,6 +49,8 @@ from experiments.revision_full.protocol import (
     QKV_SHORT_NAMES,
     RANDOM_ALLOCATIONS,
     RANDOM_CALIB_SEED,
+    RAM_BUILDER_WAIT_POLL_SECONDS,
+    RAM_BUILDER_WAIT_TIMEOUT_SECONDS,
     ROLE_SHORT_NAMES,
     RESULTS_DIR,
     SCREEN_DIR,
@@ -284,16 +286,45 @@ def ram_builder_slot(stage: str, model_key: str, calib_seed: int):
         )
         fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
         try:
+            wait_started = time.monotonic()
             available = system_available_ram_gib()
-            if (
+            while (
                 available is not None
                 and available < MIN_AVAILABLE_RAM_GIB
             ):
-                raise RuntimeError(
-                    f"Only {available:.1f} GiB system RAM is available before {stage}; "
-                    f"at least {MIN_AVAILABLE_RAM_GIB:.1f} GiB is required. "
-                    "Stop competing RAM-heavy jobs and resume; swap is not counted."
+                waited_seconds = time.monotonic() - wait_started
+                if (
+                    RAM_BUILDER_WAIT_TIMEOUT_SECONDS > 0
+                    and waited_seconds >= RAM_BUILDER_WAIT_TIMEOUT_SECONDS
+                ):
+                    raise RuntimeError(
+                        f"Only {available:.1f} GiB system RAM is available before "
+                        f"{stage} after waiting {waited_seconds:.0f} seconds; at least "
+                        f"{MIN_AVAILABLE_RAM_GIB:.1f} GiB is required. Stop competing "
+                        "RAM-heavy jobs and resume; swap is not counted."
+                    )
+                status(
+                    "ram_builder_memory_wait",
+                    model=model_key,
+                    calib_seed=calib_seed,
+                    builder_stage=stage,
+                    available_ram_gib=round(available, 1),
+                    required_ram_gib=MIN_AVAILABLE_RAM_GIB,
+                    waited_seconds=round(waited_seconds, 1),
+                    timeout_seconds=(
+                        None
+                        if RAM_BUILDER_WAIT_TIMEOUT_SECONDS == 0
+                        else RAM_BUILDER_WAIT_TIMEOUT_SECONDS
+                    ),
                 )
+                sleep_seconds = RAM_BUILDER_WAIT_POLL_SECONDS
+                if RAM_BUILDER_WAIT_TIMEOUT_SECONDS > 0:
+                    sleep_seconds = min(
+                        sleep_seconds,
+                        RAM_BUILDER_WAIT_TIMEOUT_SECONDS - waited_seconds,
+                    )
+                time.sleep(sleep_seconds)
+                available = system_available_ram_gib()
             status(
                 "ram_builder_acquired",
                 model=model_key,
@@ -1071,9 +1102,12 @@ def save_torch_atomic(value, path: Path) -> None:
     import torch
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    torch.save(value, temporary)
-    os.replace(temporary, path)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        torch.save(value, temporary)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def build_bank(model_key: str, calib_seed: int, force: bool) -> Path:

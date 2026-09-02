@@ -80,6 +80,8 @@ export REVISION_FULL_EVAL_BATCH_SIZE=4
 export REVISION_FULL_FORMAT_BATCH_SIZE=2
 export REVISION_FULL_MAX_CONCURRENT_RAM_BUILDERS=1
 export REVISION_FULL_MIN_AVAILABLE_RAM_GIB=24
+export REVISION_FULL_RAM_BUILDER_WAIT_POLL_SECONDS=30
+export REVISION_FULL_RAM_BUILDER_WAIT_TIMEOUT_SECONDS=0
 source server_env.sh
 ```
 
@@ -115,7 +117,7 @@ CUDA_VISIBLE_DEVICES=0 python experiments/revision_full/run.py build-screen-bank
 CUDA_VISIBLE_DEVICES=1 python experiments/revision_full/run.py build-screen-bank --model smollm --split-id 0 --calib-seed 41
 ```
 
-The RAM-builder lock intentionally lets only one of these commands build at a time; the other prints `ram_builder_wait` and continues after the first releases the lock. This validates real calibration, quantization, CUDA, RAM, the lock, and state writes before hundreds of evaluations. The later shards validate and reuse these exact formal states, so the pilot is not discarded work.
+The RAM-builder lock intentionally lets only one of these commands build at a time; the other prints `ram_builder_wait` and continues after the first releases the lock. If Linux has not yet reclaimed enough memory, it prints `ram_builder_memory_wait` and rechecks every 30 seconds instead of terminating the shard. The default `REVISION_FULL_RAM_BUILDER_WAIT_TIMEOUT_SECONDS=0` waits without an automatic timeout; set a positive value only if the site requires a bounded queue wait. This validates real calibration, quantization, CUDA, RAM, the lock, and state writes before hundreds of evaluations. The later shards validate and reuse these exact formal states, so the pilot is not discarded work.
 
 On the 31-GiB host, also build the largest estimated full precision bank **before** launching either long shard:
 
@@ -144,8 +146,8 @@ python experiments/revision_full/make_server_shard.py --models smollm qwen05 > s
 Start persistent sessions. Ensure the cache, offline, state-directory, and batch exports above are visible inside both sessions (placing them in a small `server_env.sh` and sourcing it is convenient):
 
 ```bash
-tmux new-session -d -s revision_gpu0 "cd /data/experiment/LQ/sg-mmp-reproducibility && source server_env.sh && CUDA_VISIBLE_DEVICES=0 bash server_plans/gpu0.sh 2>&1 | tee logs/gpu0.log"
-tmux new-session -d -s revision_gpu1 "cd /data/experiment/LQ/sg-mmp-reproducibility && source server_env.sh && CUDA_VISIBLE_DEVICES=1 bash server_plans/gpu1.sh 2>&1 | tee logs/gpu1.log"
+tmux new-session -d -s revision_gpu0 "cd /data/experiment/LQ/sg-mmp-reproducibility && source server_env.sh && set -o pipefail && CUDA_VISIBLE_DEVICES=0 bash server_plans/gpu0.sh 2>&1 | tee -a logs/gpu0.log"
+tmux new-session -d -s revision_gpu1 "cd /data/experiment/LQ/sg-mmp-reproducibility && source server_env.sh && set -o pipefail && CUDA_VISIBLE_DEVICES=1 bash server_plans/gpu1.sh 2>&1 | tee -a logs/gpu1.log"
 ```
 
 Each process sees its physical card as `cuda:0`. Model-specific status, runtime summaries, samples, state metadata, and cleanup receipts use separate paths. Dataset/model caches are shared read-only during formal execution. Both GPUs can evaluate simultaneously; only `build-screen-bank` and `build-bank`, which retain calibration activations and growing quantized states in host RAM, are mutually exclusive.
@@ -161,7 +163,7 @@ df -h /data/experiment/LQ
 du -sh experiments/revision_full/outputs "${REVISION_FULL_STATE_DIR:-experiments/revision_full/outputs/states}"
 ```
 
-The plan creates one calibration bank and at most one materialized state per process. Cleanup occurs immediately after all consumers of that state pass exact completeness checks. It hashes small persistent evidence and metadata, writes a receipt, and deletes only reconstructible `.pt` files. This adds little GPU time; shared-disk I/O is the main overhead. Do not add `--force` during normal resume.
+The plan creates one calibration bank and at most one materialized state per process. Cleanup occurs immediately after all consumers of that state pass exact completeness checks. It hashes small persistent evidence and metadata, writes a receipt, and deletes only reconstructible `.pt` files. Interrupted state writes remove their process-specific `.tmp` files automatically. This adds little GPU time; shared-disk I/O is the main overhead. Do not add `--force` during normal resume. The launch commands use `pipefail` so a failed shard is not reported as successful merely because `tee` exited normally, and `tee -a` preserves earlier diagnostic logs on resume.
 
 If a shard stops, inspect the last traceback, fix the external cause, and rerun the same shard. Completed v4 rows are validated and skipped; partial rows resume only if IDs, provenance, batch, and decoding settings match. Never concatenate JSONL files manually.
 

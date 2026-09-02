@@ -38,6 +38,10 @@ export REVISION_FULL_FORMAT_BATCH_SIZE=2
 # screen/precision builder at a time. Evaluation remains concurrent.
 export REVISION_FULL_MAX_CONCURRENT_RAM_BUILDERS=1
 export REVISION_FULL_MIN_AVAILABLE_RAM_GIB=24
+# Recheck transient post-builder RAM reclamation instead of terminating a shard.
+# Zero means no automatic timeout; Ctrl+C still cancels a genuinely blocked job.
+export REVISION_FULL_RAM_BUILDER_WAIT_POLL_SECONDS=30
+export REVISION_FULL_RAM_BUILDER_WAIT_TIMEOUT_SECONDS=0
 export PYTHONUNBUFFERED=1
 
 # Uncomment only when a sufficiently large, durable-for-the-job scratch path

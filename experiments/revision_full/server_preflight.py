@@ -21,6 +21,8 @@ from experiments.revision_full.protocol import (
     MIN_AVAILABLE_RAM_GIB,
     MODEL_SPECS,
     OUT,
+    RAM_BUILDER_WAIT_POLL_SECONDS,
+    RAM_BUILDER_WAIT_TIMEOUT_SECONDS,
     ROOT,
     STATE_DIR,
 )
@@ -428,6 +430,8 @@ def main() -> None:
             "concurrent_models": args.concurrent_models,
             "ram_execution_mode": ram["mode"],
             "max_concurrent_ram_builders": MAX_CONCURRENT_RAM_BUILDERS,
+            "ram_builder_wait_poll_seconds": RAM_BUILDER_WAIT_POLL_SECONDS,
+            "ram_builder_wait_timeout_seconds": RAM_BUILDER_WAIT_TIMEOUT_SECONDS,
             "concurrent_model_state_peaks_gib": [
                 round(value, 2) for value in concurrent_peaks
             ],

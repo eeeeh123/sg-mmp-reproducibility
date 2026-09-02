@@ -284,7 +284,25 @@ class ServerPlanLifecycleTests(unittest.TestCase):
         finally:
             shutil.rmtree(temporary, ignore_errors=True)
 
-    def test_ram_builder_lock_releases_when_available_ram_is_too_low(self):
+    def test_failed_torch_state_write_removes_large_temporary_file(self):
+        temporary = protocol.OUT / f".test_atomic_torch_{uuid.uuid4().hex}"
+        path = temporary / "state.pt"
+
+        def interrupted_save(_value, target):
+            Path(target).write_bytes(b"incomplete")
+            raise RuntimeError("simulated interrupted state write")
+
+        fake_torch = SimpleNamespace(save=interrupted_save)
+        try:
+            with patch.dict(sys.modules, {"torch": fake_torch}):
+                with self.assertRaisesRegex(RuntimeError, "simulated interrupted"):
+                    revision_run.save_torch_atomic({}, path)
+            self.assertFalse(path.exists())
+            self.assertEqual(list(temporary.glob("*.tmp")), [])
+        finally:
+            shutil.rmtree(temporary, ignore_errors=True)
+
+    def test_ram_builder_waits_for_memory_then_runs(self):
         calls = []
         fake_fcntl = SimpleNamespace(
             LOCK_EX=1,
@@ -297,13 +315,62 @@ class ServerPlanLifecycleTests(unittest.TestCase):
             with (
                 patch.object(revision_run, "MAX_CONCURRENT_RAM_BUILDERS", 1),
                 patch.object(revision_run, "MIN_AVAILABLE_RAM_GIB", 24),
+                patch.object(revision_run, "RAM_BUILDER_WAIT_POLL_SECONDS", 30),
+                patch.object(revision_run, "RAM_BUILDER_WAIT_TIMEOUT_SECONDS", 0),
+                patch.object(revision_run, "OUT", temporary),
+                patch.object(
+                    revision_run,
+                    "system_available_ram_gib",
+                    side_effect=[18.8, 26.9],
+                ),
+                patch.object(revision_run, "supports_posix_file_lock", return_value=True),
+                patch.object(revision_run, "status") as status,
+                patch.object(revision_run.time, "monotonic", side_effect=[0, 0]),
+                patch.object(revision_run.time, "sleep") as sleep,
+                patch.dict(sys.modules, {"fcntl": fake_fcntl}),
+            ):
+                with revision_run.ram_builder_slot("build-bank", "gemma2", 41):
+                    calls.append("builder")
+        finally:
+            shutil.rmtree(temporary, ignore_errors=True)
+        self.assertEqual(
+            calls,
+            [fake_fcntl.LOCK_EX, "builder", fake_fcntl.LOCK_UN],
+        )
+        sleep.assert_called_once_with(30)
+        self.assertEqual(
+            [item.args[0] for item in status.call_args_list],
+            ["ram_builder_wait", "ram_builder_memory_wait", "ram_builder_acquired"],
+        )
+
+    def test_ram_builder_lock_releases_when_memory_wait_times_out(self):
+        calls = []
+        fake_fcntl = SimpleNamespace(
+            LOCK_EX=1,
+            LOCK_UN=2,
+            flock=lambda _descriptor, mode: calls.append(mode),
+        )
+        temporary = protocol.OUT / f".test_ram_lock_{uuid.uuid4().hex}"
+        temporary.mkdir(parents=True)
+        try:
+            with (
+                patch.object(revision_run, "MAX_CONCURRENT_RAM_BUILDERS", 1),
+                patch.object(revision_run, "MIN_AVAILABLE_RAM_GIB", 24),
+                patch.object(revision_run, "RAM_BUILDER_WAIT_POLL_SECONDS", 30),
+                patch.object(revision_run, "RAM_BUILDER_WAIT_TIMEOUT_SECONDS", 60),
                 patch.object(revision_run, "OUT", temporary),
                 patch.object(revision_run, "system_available_ram_gib", return_value=23),
                 patch.object(revision_run, "supports_posix_file_lock", return_value=True),
                 patch.object(revision_run, "status"),
+                patch.object(
+                    revision_run.time,
+                    "monotonic",
+                    side_effect=[0, 0, 30, 60],
+                ),
+                patch.object(revision_run.time, "sleep"),
                 patch.dict(sys.modules, {"fcntl": fake_fcntl}),
             ):
-                with self.assertRaisesRegex(RuntimeError, "Only 23.0 GiB"):
+                with self.assertRaisesRegex(RuntimeError, "after waiting 60 seconds"):
                     with revision_run.ram_builder_slot("build-bank", "gemma2", 41):
                         self.fail("the low-RAM guard must fail before the builder runs")
         finally:

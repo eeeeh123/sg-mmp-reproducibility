@@ -36,7 +36,7 @@
 ## 两张 RTX 3090 的冻结执行设置
 
 - 两卡运行两个相互独立的单卡进程；不使用数据并行，也不把一个 batch 跨卡拆分。
-- 31 GiB 内存模式下设置 `REVISION_FULL_MAX_CONCURRENT_RAM_BUILDERS=1` 和 `REVISION_FULL_MIN_AVAILABLE_RAM_GIB=24`：两进程可并行评估，但 `build-screen-bank` / `build-bank` 由跨进程文件锁串行。该调度不改变样本、量化方法、种子、batch、指标或实验矩阵。
+- 31 GiB 内存模式下设置 `REVISION_FULL_MAX_CONCURRENT_RAM_BUILDERS=1` 和 `REVISION_FULL_MIN_AVAILABLE_RAM_GIB=24`：两进程可并行评估，但 `build-screen-bank` / `build-bank` 由跨进程文件锁串行。获得锁后若系统尚未回收至 24 GiB，进程默认每 30 秒复查并继续等待，不再因瞬时低内存终止整个 shard；该调度不改变样本、量化方法、种子、batch、指标或实验矩阵。
 - 初始值为每卡生成 batch `4`、四选一 item batch `2`、`max_new_tokens=256`。双卡不意味着每进程 batch 翻倍。
 - 四模型 train-only smoke 全部通过后才写协议锁。如果任一 OOM，统一降到 `2/1`，删除尚未产生的 v4 协议锁并重新 `prepare --force`；正式样本产生后禁止改 batch。
 - 建议分片：GPU0 `gemma2 qwen15`，GPU1 `smollm qwen05`。Gemma 没有 60 组随机分配全集评估，因此与 Qwen-1.5B 配对；SmolLM 与含额外因果诊断的 Qwen-0.5B 配对，比只按模型大小分片更接近实际总推理负载。
@@ -52,7 +52,7 @@
 
 这里的 GiB 空闲量均指磁盘；`free -h` 中约 31 GiB 的 `Mem` 才是系统内存。两张 3090 的各 24 GiB 显存、8 GiB swap 和 `/data` 的 103 GiB 可用空间都不能相互替代。低内存调度只串行高峰 builder，仍允许两张卡同时进行长时间评估。
 
-生命周期清理不会在每一步重算量化。它只校验小型证据文件、写哈希收据并删除可重建 `.pt`，相对多日 GPU 推理开销很小。模型权重和数据 cache 的完整哈希在正式启动前读取一次，可能增加数分钟并产生共享盘 I/O；这是防止跑几天后才发现文件损坏的必要成本。不要对已有有效状态使用 `--force`，因为强制重建时旧文件与临时文件可能短时并存。
+生命周期清理不会在每一步重算量化。它只校验小型证据文件、写哈希收据并删除可重建 `.pt`，相对多日 GPU 推理开销很小。大型状态采用同目录原子替换；写入失败时自动删除按进程命名的临时文件，避免异常退出遗留数 GiB 无效占用。模型权重和数据 cache 的完整哈希在正式启动前读取一次，可能增加数分钟并产生共享盘 I/O；这是防止跑几天后才发现文件损坏的必要成本。不要对已有有效状态使用 `--force`，因为强制重建时旧文件与临时文件可能短时并存。
 
 TaCQ 官方流程会生成接近 checkpoint 尺度的重要性文件，不计入上述内部 core 峰值。外部基线应在 core 完成后、模型逐个顺序运行，优先使用额外 scratch；只有在 1,319 条 canonical 样本、配置和哈希持久化后才删除其重要性/临时 checkpoint。外部适配失败不会使已通过 v4 契约的 core 数字重跑，但会阻止投稿级 gate 通过。
 
