@@ -26,12 +26,16 @@ from experiments.revision_full.server_preflight import (
     ram_thresholds,
     storage_thresholds,
 )
-from experiments.revision_full.download_core_datasets import snapshot_sha256
+from experiments.revision_full.download_core_datasets import CORE_REQUESTS, snapshot_sha256
 from experiments.revision_full.download_models import stable_model_record
 from experiments.revision_full.storage_layout import storage_layout_errors
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_core_hub_dataset_ids_are_namespaced(self):
+        for dataset_name, _, _ in CORE_REQUESTS:
+            self.assertIn("/", dataset_name)
+
     def test_documented_download_entrypoints_run_by_path(self):
         model_result = subprocess.run(
             [

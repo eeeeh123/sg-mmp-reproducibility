@@ -22,7 +22,7 @@ OUT = ROOT / "experiments" / "revision_full" / "outputs"
 MANIFEST_PATH = OUT / "dataset_snapshot_manifest.json"
 CORE_REQUESTS = (
     ("openai/gsm8k", "main", ("train", "test")),
-    ("wikitext", "wikitext-2-raw-v1", ("train",)),
+    ("Salesforce/wikitext", "wikitext-2-raw-v1", ("train",)),
 )
 PANEL_TASKS = (
     "arc_challenge",

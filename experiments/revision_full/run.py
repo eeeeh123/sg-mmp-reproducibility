@@ -208,7 +208,7 @@ def frozen_wikitext_calibration(tokenizer, calib_seed: int):
     from ptq.data import _packed_random_segments
 
     rows = frozen_arrow_rows(
-        "wikitext/wikitext-2-raw-v1/train", "wikitext-train.arrow"
+        "Salesforce/wikitext/wikitext-2-raw-v1/train", "wikitext-train.arrow"
     )
     texts = [row["text"] for row in rows if row.get("text") and row["text"].strip()]
     return _packed_random_segments(
