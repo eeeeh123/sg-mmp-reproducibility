@@ -1,5 +1,8 @@
 """CPU-only checks for the locked revision protocol."""
 
+import os
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -29,6 +32,48 @@ from experiments.revision_full.storage_layout import storage_layout_errors
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_documented_download_entrypoints_run_by_path(self):
+        model_result = subprocess.run(
+            [
+                sys.executable,
+                str(protocol.ROOT / "experiments/revision_full/download_models.py"),
+                "--help",
+            ],
+            cwd=protocol.ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(model_result.returncode, 0, model_result.stderr)
+
+        environment = os.environ.copy()
+        for name in (
+            "REVISION_FULL_PROJECT_DIR",
+            "REVISION_FULL_STORAGE_ROOT",
+            "HF_HOME",
+            "HF_DATASETS_CACHE",
+            "HF_HUB_CACHE",
+            "HF_TOKEN_PATH",
+        ):
+            environment.pop(name, None)
+        dataset_result = subprocess.run(
+            [
+                sys.executable,
+                str(
+                    protocol.ROOT
+                    / "experiments/revision_full/download_core_datasets.py"
+                ),
+            ],
+            cwd=protocol.ROOT,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertNotEqual(dataset_result.returncode, 0)
+        self.assertIn("Refusing to download outside", dataset_result.stderr)
+        self.assertNotIn("ModuleNotFoundError", dataset_result.stderr)
+
     def test_storage_layout_rejects_cache_outside_experiment_root(self):
         project = Path("/data/experiment/LQ/sg-mmp-reproducibility")
         base = {

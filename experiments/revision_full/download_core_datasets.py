@@ -5,15 +5,19 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from datasets import load_dataset
 
 from experiments.revision_full.storage_layout import require_managed_storage
 
 
-ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "experiments" / "revision_full" / "outputs"
 MANIFEST_PATH = OUT / "dataset_snapshot_manifest.json"
 CORE_REQUESTS = (

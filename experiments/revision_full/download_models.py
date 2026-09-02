@@ -12,15 +12,19 @@ import argparse
 import hashlib
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from huggingface_hub import HfApi, get_token, snapshot_download
 
 from experiments.revision_full.storage_layout import require_managed_storage
 
 
-ROOT = Path(__file__).resolve().parents[2]
 MANIFEST_PATH = (
     ROOT / "experiments" / "revision_full" / "outputs" / "model_snapshot_manifest.json"
 )
