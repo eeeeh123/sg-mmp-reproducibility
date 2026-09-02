@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 
 from datasets import load_dataset
 
+from experiments.revision_full.lm_eval_compat import RevisionTaskManager
 from experiments.revision_full.storage_layout import require_managed_storage
 
 
@@ -136,9 +137,9 @@ def evaluation_doc_count(task) -> int:
 
 
 def panel_inventory() -> dict:
-    from lm_eval.tasks import TaskManager, get_task_dict
+    from lm_eval.tasks import get_task_dict
 
-    manager = TaskManager(
+    manager = RevisionTaskManager(
         include_path=str(ROOT / "experiments" / "fix_svamp_ood"),
         verbosity="ERROR",
     )

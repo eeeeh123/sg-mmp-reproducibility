@@ -28,10 +28,19 @@ from experiments.revision_full.server_preflight import (
 )
 from experiments.revision_full.download_core_datasets import CORE_REQUESTS, snapshot_sha256
 from experiments.revision_full.download_models import stable_model_record
+from experiments.revision_full.lm_eval_compat import RevisionTaskManager
 from experiments.revision_full.storage_layout import storage_layout_errors
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_truthfulqa_generation_uses_namespaced_dataset_repo(self):
+        manager = RevisionTaskManager(
+            include_path=str(protocol.ROOT / "experiments" / "fix_svamp_ood"),
+            verbosity="ERROR",
+        )
+        config = manager._get_config("truthfulqa_gen")
+        self.assertEqual(config["dataset_path"], "truthfulqa/truthful_qa")
+
     def test_core_hub_dataset_ids_are_namespaced(self):
         for dataset_name, _, _ in CORE_REQUESTS:
             self.assertIn("/", dataset_name)

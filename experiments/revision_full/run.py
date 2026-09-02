@@ -1638,8 +1638,9 @@ def evaluate_extra(
     import torch
     from lm_eval import simple_evaluate
     from lm_eval.models.huggingface import HFLM
-    from lm_eval.tasks import TaskManager
     from ptq.eval import cleanup_gpu
+
+    from experiments.revision_full.lm_eval_compat import RevisionTaskManager
 
     require_locked_batch(batch_size)
     expected_method = method_id(variant, calib_seed)
@@ -1676,7 +1677,7 @@ def evaluate_extra(
         max_batch_size=batch_size,
     )
     tasks = list(EXTRA_TASKS)
-    task_manager = TaskManager(
+    task_manager = RevisionTaskManager(
         include_path=str(OUT.parents[1] / "fix_svamp_ood")
     )
     path = RESULTS_DIR / "extra" / f"{model_key}__{method}.json"
