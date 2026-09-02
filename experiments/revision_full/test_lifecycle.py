@@ -377,8 +377,8 @@ class ServerPlanLifecycleTests(unittest.TestCase):
         self.assertLess(hardware, first_model)
 
     def test_two_gpu_shards_partition_every_model_command(self):
-        gpu0 = shard_commands(["gemma2", "qwen05"])
-        gpu1 = shard_commands(["smollm", "qwen15"])
+        gpu0 = shard_commands(["gemma2", "qwen15"])
+        gpu1 = shard_commands(["smollm", "qwen05"])
         self.assertEqual(len(gpu0), len(set(gpu0)))
         self.assertEqual(len(gpu1), len(set(gpu1)))
         self.assertFalse(set(gpu0) & set(gpu1))

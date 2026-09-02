@@ -39,7 +39,7 @@
 - 31 GiB 内存模式下设置 `REVISION_FULL_MAX_CONCURRENT_RAM_BUILDERS=1` 和 `REVISION_FULL_MIN_AVAILABLE_RAM_GIB=24`：两进程可并行评估，但 `build-screen-bank` / `build-bank` 由跨进程文件锁串行。该调度不改变样本、量化方法、种子、batch、指标或实验矩阵。
 - 初始值为每卡生成 batch `4`、四选一 item batch `2`、`max_new_tokens=256`。双卡不意味着每进程 batch 翻倍。
 - 四模型 train-only smoke 全部通过后才写协议锁。如果任一 OOM，统一降到 `2/1`，删除尚未产生的 v4 协议锁并重新 `prepare --force`；正式样本产生后禁止改 batch。
-- 建议分片：GPU0 `gemma2 qwen05`，GPU1 `smollm qwen15`。两边都先跑较大模型，负载较平衡且使储存预检覆盖最坏并发峰值。
+- 建议分片：GPU0 `gemma2 qwen15`，GPU1 `smollm qwen05`。Gemma 没有 60 组随机分配全集评估，因此与 Qwen-1.5B 配对；SmolLM 与含额外因果诊断的 Qwen-0.5B 配对，比只按模型大小分片更接近实际总推理负载。
 - 两进程的运行日志、状态文件、样本、状态和清理收据均按模型隔离。模型/数据缓存只读共享。
 
 ## 储存与运行时间影响

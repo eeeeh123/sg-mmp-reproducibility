@@ -10,6 +10,8 @@ from pathlib import Path
 
 from datasets import load_dataset
 
+from experiments.revision_full.storage_layout import require_managed_storage
+
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "experiments" / "revision_full" / "outputs"
@@ -192,6 +194,7 @@ def verify_cache_files(manifest: dict) -> list[str]:
 
 
 def main() -> None:
+    require_managed_storage(ROOT)
     core = {}
     for dataset_name, config, splits in CORE_REQUESTS:
         for split in splits:

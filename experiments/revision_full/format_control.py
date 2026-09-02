@@ -33,6 +33,7 @@ from experiments.revision_full.run import (
     get_dataset,
     model_provenance,
     require_locked_batch,
+    write_json,
 )
 
 
@@ -242,9 +243,7 @@ def prepare_manifest(force: bool = False) -> dict:
         "demos": demos,
         "items": items,
     }
-    MANIFEST_PATH.write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    write_json(MANIFEST_PATH, manifest)
     return manifest
 
 

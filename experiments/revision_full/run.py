@@ -101,12 +101,14 @@ ROLE_PRIORITY_VARIANTS = {
 }
 
 
-def write_json(path: Path, value) -> None:
+def write_json(path: Path, value, *, default=None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    dump_options = {"default": default} if default is not None else {}
     try:
         temporary.write_text(
-            json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8"
+            json.dumps(value, ensure_ascii=False, indent=2, **dump_options),
+            encoding="utf-8",
         )
         os.replace(temporary, path)
     finally:
@@ -1712,11 +1714,7 @@ def evaluate_extra(
             "n_samples": len(samples),
             "samples": samples,
         }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(record, ensure_ascii=False, indent=2, default=str),
-            encoding="utf-8",
-        )
+        write_json(path, record, default=str)
         torch.cuda.empty_cache()
     del lm_model, model, tokenizer
     cleanup_gpu()

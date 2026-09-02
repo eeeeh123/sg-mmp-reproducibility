@@ -32,6 +32,7 @@ from experiments.revision_full.download_core_datasets import (
     verify_cache_files,
 )
 from experiments.revision_full.readiness import preflight_errors
+from experiments.revision_full.storage_layout import storage_layout_errors
 
 
 EXPECTED_VERSIONS = {
@@ -185,6 +186,7 @@ def main() -> None:
         )
     errors: list[str] = []
     warnings: list[str] = []
+    errors.extend(storage_layout_errors(ROOT))
     if sys.version_info[:2] != (3, 12):
         errors.append(
             f"Python {sys.version_info.major}.{sys.version_info.minor} is active; "

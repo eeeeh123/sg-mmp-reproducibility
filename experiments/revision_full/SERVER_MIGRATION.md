@@ -25,19 +25,23 @@ System RAM and disk free space are independent capacities: for example, `31 GiB`
 cd /data/experiment/LQ
 git clone https://github.com/eeeeh123/sg-mmp-reproducibility.git
 cd sg-mmp-reproducibility
-python3.12 -m venv .venv
-source .venv/bin/activate
+conda create -p /home/ubuntu/anaconda3/envs/LQ-sgmmp python=3.12 -y
+conda activate /home/ubuntu/anaconda3/envs/LQ-sgmmp
 python -m pip install --upgrade pip
 python -m pip install -r requirements-server.txt
 ```
 
-Set every cache inside the allocated large filesystem:
+Create the project-local launcher configuration. It selects this conda
+environment only in shells that source it; it does not modify global shell or
+conda configuration. During online staging, it also places the Hugging Face
+token and every download cache below `/data/experiment/LQ`:
 
 ```bash
-export HF_HOME=/data/experiment/LQ/huggingface
-export HF_DATASETS_CACHE=$HF_HOME/datasets
-export HF_HUB_CACHE=$HF_HOME/hub
-mkdir -p "$HF_DATASETS_CACHE" "$HF_HUB_CACHE"
+cp experiments/revision_full/server_env.template.sh server_env.sh
+export REVISION_FULL_ONLINE_STAGING=1
+source server_env.sh
+which python
+python --version
 ```
 
 Optional separate scratch for reconstructible states:
@@ -63,8 +67,8 @@ Gemma requires accepting its Hugging Face license. The model downloader resolves
 After staging, freeze network dependence:
 
 ```bash
-export HF_HUB_OFFLINE=1
-export HF_DATASETS_OFFLINE=1
+unset REVISION_FULL_ONLINE_STAGING
+source server_env.sh
 ```
 
 ## 3. Select the only allowed batch settings before formal output
@@ -76,7 +80,6 @@ export REVISION_FULL_EVAL_BATCH_SIZE=4
 export REVISION_FULL_FORMAT_BATCH_SIZE=2
 export REVISION_FULL_MAX_CONCURRENT_RAM_BUILDERS=1
 export REVISION_FULL_MIN_AVAILABLE_RAM_GIB=24
-cp experiments/revision_full/server_env.template.sh server_env.sh
 source server_env.sh
 ```
 
@@ -84,9 +87,9 @@ Smoke all architectures using GSM8K train only. The commands may be run in two t
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python experiments/revision_full/run.py smoke-eval --model gemma2 --batch-size 4 --format-batch-size 2
-CUDA_VISIBLE_DEVICES=0 python experiments/revision_full/run.py smoke-eval --model qwen05 --batch-size 4 --format-batch-size 2
+CUDA_VISIBLE_DEVICES=0 python experiments/revision_full/run.py smoke-eval --model qwen15 --batch-size 4 --format-batch-size 2
 CUDA_VISIBLE_DEVICES=1 python experiments/revision_full/run.py smoke-eval --model smollm --batch-size 4 --format-batch-size 2
-CUDA_VISIBLE_DEVICES=1 python experiments/revision_full/run.py smoke-eval --model qwen15 --batch-size 4 --format-batch-size 2
+CUDA_VISIBLE_DEVICES=1 python experiments/revision_full/run.py smoke-eval --model qwen05 --batch-size 4 --format-batch-size 2
 ```
 
 If any smoke test OOMs, change the environment globally and in `server_env.sh` to `2` and `1`, rerun all four smoke tests, and use those values everywhere. Two GPUs do not justify doubling a per-process batch. Once `prepare` creates the v4 lock or any formal sample exists, do not change batch size; the pipeline rejects mixed-batch resume files.
@@ -127,20 +130,22 @@ python experiments/revision_full/server_preflight.py --expected-gpus 2 --concurr
 
 ## 5. Generate two non-overlapping model shards
 
-Use largest-plus-smallest pairing to balance runtime:
+Balance the expensive full-set random-allocation evaluations as well as model
+size. Gemma has no random-allocation block, so pair it with Qwen-1.5B; pair
+SmolLM with Qwen-0.5B (whose extra causal diagnostic is comparatively smaller):
 
 ```bash
 source server_env.sh
 mkdir -p server_plans logs
-python experiments/revision_full/make_server_shard.py --models gemma2 qwen05 > server_plans/gpu0.sh
-python experiments/revision_full/make_server_shard.py --models smollm qwen15 > server_plans/gpu1.sh
+python experiments/revision_full/make_server_shard.py --models gemma2 qwen15 > server_plans/gpu0.sh
+python experiments/revision_full/make_server_shard.py --models smollm qwen05 > server_plans/gpu1.sh
 ```
 
 Start persistent sessions. Ensure the cache, offline, state-directory, and batch exports above are visible inside both sessions (placing them in a small `server_env.sh` and sourcing it is convenient):
 
 ```bash
-tmux new-session -d -s revision_gpu0 "cd /data/experiment/LQ/sg-mmp-reproducibility && source .venv/bin/activate && source server_env.sh && CUDA_VISIBLE_DEVICES=0 bash server_plans/gpu0.sh 2>&1 | tee logs/gpu0.log"
-tmux new-session -d -s revision_gpu1 "cd /data/experiment/LQ/sg-mmp-reproducibility && source .venv/bin/activate && source server_env.sh && CUDA_VISIBLE_DEVICES=1 bash server_plans/gpu1.sh 2>&1 | tee logs/gpu1.log"
+tmux new-session -d -s revision_gpu0 "cd /data/experiment/LQ/sg-mmp-reproducibility && source server_env.sh && CUDA_VISIBLE_DEVICES=0 bash server_plans/gpu0.sh 2>&1 | tee logs/gpu0.log"
+tmux new-session -d -s revision_gpu1 "cd /data/experiment/LQ/sg-mmp-reproducibility && source server_env.sh && CUDA_VISIBLE_DEVICES=1 bash server_plans/gpu1.sh 2>&1 | tee logs/gpu1.log"
 ```
 
 Each process sees its physical card as `cuda:0`. Model-specific status, runtime summaries, samples, state metadata, and cleanup receipts use separate paths. Dataset/model caches are shared read-only during formal execution. Both GPUs can evaluate simultaneously; only `build-screen-bank` and `build-bank`, which retain calibration activations and growing quantized states in host RAM, are mutually exclusive.

@@ -1,6 +1,7 @@
 """CPU-only checks for the locked revision protocol."""
 
 import unittest
+from pathlib import Path
 
 from experiments.revision_full import protocol
 from experiments.revision_full.protocol import (
@@ -24,9 +25,26 @@ from experiments.revision_full.server_preflight import (
 )
 from experiments.revision_full.download_core_datasets import snapshot_sha256
 from experiments.revision_full.download_models import stable_model_record
+from experiments.revision_full.storage_layout import storage_layout_errors
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_storage_layout_rejects_cache_outside_experiment_root(self):
+        project = Path("/data/experiment/LQ/sg-mmp-reproducibility")
+        base = {
+            "REVISION_FULL_PROJECT_DIR": str(project),
+            "REVISION_FULL_STORAGE_ROOT": "/data/experiment/LQ",
+            "HF_HOME": "/data/experiment/LQ/huggingface",
+            "HF_DATASETS_CACHE": "/data/experiment/LQ/huggingface/datasets",
+            "HF_HUB_CACHE": "/data/experiment/LQ/huggingface/hub",
+            "HF_TOKEN_PATH": "/data/experiment/LQ/huggingface/token",
+        }
+        self.assertEqual(storage_layout_errors(project, base), [])
+        outside = {**base, "HF_HUB_CACHE": "/home/ubuntu/.cache/huggingface/hub"}
+        self.assertTrue(storage_layout_errors(project, outside))
+        broad_root = {**base, "REVISION_FULL_STORAGE_ROOT": "/data/experiment"}
+        self.assertTrue(storage_layout_errors(project, broad_root))
+
     def test_three_calibration_seeds_are_frozen(self):
         self.assertEqual(len(CALIB_SEEDS), 3)
 

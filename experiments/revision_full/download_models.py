@@ -17,6 +17,8 @@ from pathlib import Path
 
 from huggingface_hub import HfApi, get_token, snapshot_download
 
+from experiments.revision_full.storage_layout import require_managed_storage
+
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST_PATH = (
@@ -205,6 +207,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    require_managed_storage(ROOT)
     revisions = parse_revisions(args.revision)
     token = get_token() or os.environ.get("HF_TOKEN")
     manifest = read_manifest()
