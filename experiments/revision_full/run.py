@@ -66,7 +66,7 @@ from experiments.revision_full.protocol import (
     fixed_causal_patch_indices,
     json_sha256,
     make_disjoint_screen_splits,
-    make_unique_random_layer_allocations,
+    make_random_layer_allocation_plan,
     make_unique_random_module_allocations,
     method_id,
     role_priority_budget_match,
@@ -74,6 +74,7 @@ from experiments.revision_full.protocol import (
     select_layers_under_budget,
     state_metadata_path,
     state_path,
+    validate_random_allocation_manifest,
 )
 from experiments.revision_full.lifecycle import (
     bank_consumers_complete,
@@ -943,11 +944,12 @@ def select_model(model_key: str) -> dict:
     modules = module_rows(model)
     selection = select_layers_under_budget(ranking, modules, TARGET_AVG_BITS)
     selected = set(selection["selected_layers"])
-    random_layer_allocations = make_unique_random_layer_allocations(
+    random_layer_plan = make_random_layer_allocation_plan(
         modules,
         set(selection["w8_module_names"]),
         selection["selected_layers"],
     )
+    random_layer_allocations = random_layer_plan["sets"]
     random_module_allocations = make_unique_random_module_allocations(
         modules, set(selection["w8_module_names"])
     )
@@ -1046,9 +1048,15 @@ def select_model(model_key: str) -> dict:
         "mean_top_set_jaccard": statistics.mean(jaccards),
         "selection_bootstrap": bootstrap_stability,
         "random_allocation_manifest": {
+            "requested_count_per_family": RANDOM_ALLOCATIONS,
             "count_per_family": RANDOM_ALLOCATIONS,
             "layer_seed": 20261001,
             "module_seed": 20262001,
+            "layer_feasibility": {
+                key: value
+                for key, value in random_layer_plan.items()
+                if key != "sets"
+            },
             "layer_sets": random_layer_allocations,
             "module_sets": random_module_allocations,
             "layer_sets_sha256": json_sha256(random_layer_allocations),
@@ -1084,18 +1092,22 @@ def selection_for(model_key: str) -> dict:
     if selection.get("model_snapshot") != model_provenance(model_key):
         raise RuntimeError(f"Selection model provenance has changed: {path}")
     manifest = selection.get("random_allocation_manifest", {})
-    layer_sets = manifest.get("layer_sets", [])
-    module_sets = manifest.get("module_sets", [])
-    if (
-        len(layer_sets) != RANDOM_ALLOCATIONS
-        or len({tuple(row) for row in layer_sets}) != RANDOM_ALLOCATIONS
-        or manifest.get("layer_sets_sha256") != json_sha256(layer_sets)
-        or len(module_sets) != RANDOM_ALLOCATIONS
-        or len({tuple(row) for row in module_sets}) != RANDOM_ALLOCATIONS
-        or manifest.get("module_sets_sha256") != json_sha256(module_sets)
-    ):
+    try:
+        validate_random_allocation_manifest(manifest)
+    except (TypeError, ValueError):
         raise RuntimeError(f"Selection random-allocation manifest is invalid: {path}")
     return selection
+
+
+def allocation_ids(model_key: str, family: str) -> list[int]:
+    """Return only the preregistered allocation ids for a model/family."""
+    if family not in {"layer", "module"}:
+        raise ValueError("family must be layer or module")
+    selection = selection_for(model_key)
+    counts = validate_random_allocation_manifest(
+        selection["random_allocation_manifest"]
+    )
+    return list(range(counts[family]))
 
 
 def save_torch_atomic(value, path: Path) -> None:
@@ -1184,8 +1196,11 @@ def build_bank(model_key: str, calib_seed: int, force: bool) -> Path:
 def _random_module_allocation(selection: dict, allocation_id: int) -> set[str]:
     manifest = selection.get("random_allocation_manifest", {})
     allocations = manifest.get("module_sets", [])
-    if len(allocations) != RANDOM_ALLOCATIONS:
-        raise RuntimeError("Selection lacks the preregistered random-module manifest")
+    counts = validate_random_allocation_manifest(manifest)
+    if not 0 <= allocation_id < counts["module"]:
+        raise ValueError(
+            f"Random module allocation id must be in [0, {counts['module'] - 1}]"
+        )
     return set(allocations[allocation_id])
 
 
@@ -1220,11 +1235,13 @@ def _policy_for_variant(
         selected = set()
     elif variant.startswith("random_"):
         allocation_id = int(variant.split("_", 1)[1])
-        allocations = selection.get("random_allocation_manifest", {}).get(
-            "layer_sets", []
-        )
-        if len(allocations) != RANDOM_ALLOCATIONS:
-            raise RuntimeError("Selection lacks the preregistered random-layer manifest")
+        manifest = selection.get("random_allocation_manifest", {})
+        allocations = manifest.get("layer_sets", [])
+        counts = validate_random_allocation_manifest(manifest)
+        if not 0 <= allocation_id < counts["layer"]:
+            raise ValueError(
+                f"Random layer allocation id must be in [0, {counts['layer'] - 1}]"
+            )
         selected = {int(layer) for layer in allocations[allocation_id]}
 
     def policy(module_idx: int, name: str, short: str) -> str:
@@ -1255,13 +1272,9 @@ def materialize(model_key: str, calib_seed: int, variant: str, force: bool) -> P
     from ptq.quant.mixed_precision import compose_precision_state
 
     if variant.startswith("random_modules_"):
-        allocation_id = int(variant.rsplit("_", 1)[1])
-        if not 0 <= allocation_id < RANDOM_ALLOCATIONS:
-            raise ValueError(f"Random module allocation id must be in [0, {RANDOM_ALLOCATIONS - 1}]")
+        int(variant.rsplit("_", 1)[1])
     elif variant.startswith("random_"):
-        allocation_id = int(variant.split("_", 1)[1])
-        if not 0 <= allocation_id < RANDOM_ALLOCATIONS:
-            raise ValueError(f"Random allocation id must be in [0, {RANDOM_ALLOCATIONS - 1}]")
+        int(variant.split("_", 1)[1])
     elif variant not in {
         "gptq_w4",
         "qkv_only",
@@ -1871,6 +1884,10 @@ def main() -> None:
     p = sub.add_parser("select")
     p.add_argument("--model", required=True)
 
+    p = sub.add_parser("allocation-ids")
+    p.add_argument("--model", required=True)
+    p.add_argument("--family", choices=["layer", "module"], required=True)
+
     p = sub.add_parser("build-bank")
     p.add_argument("--model", required=True)
     p.add_argument("--calib-seed", type=int, choices=CALIB_SEEDS, required=True)
@@ -1956,6 +1973,9 @@ def main() -> None:
         )
     elif args.command == "select":
         selection = select_model(model_key)
+        allocation_counts = validate_random_allocation_manifest(
+            selection["random_allocation_manifest"]
+        )
         print(
             json.dumps(
                 {
@@ -1963,11 +1983,14 @@ def main() -> None:
                     "selected_layers": selection["selected_layers"],
                     "actual_avg_bits": selection["actual_avg_bits"],
                     "mean_top_set_jaccard": selection["mean_top_set_jaccard"],
+                    "random_allocation_counts": allocation_counts,
                 },
                 ensure_ascii=False,
                 indent=2,
             )
         )
+    elif args.command == "allocation-ids":
+        print(" ".join(str(value) for value in allocation_ids(model_key, args.family)))
     elif args.command == "build-bank":
         print(build_bank(model_key, args.calib_seed, args.force))
     elif args.command == "materialize":

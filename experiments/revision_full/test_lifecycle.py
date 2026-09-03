@@ -455,6 +455,15 @@ class ServerPlanLifecycleTests(unittest.TestCase):
         self.assertEqual(set(gpu0) | set(gpu1), model_commands)
         self.assertFalse(any("analyze.py" in command for command in gpu0 + gpu1))
 
+    def test_plan_uses_model_specific_locked_random_allocation_ids(self):
+        plan = list(commands())
+        dynamic = [command for command in plan if "allocation-ids" in command]
+        self.assertEqual(len(dynamic), 6)
+        self.assertTrue(
+            all("for allocation_id in $(python " in command for command in dynamic)
+        )
+        self.assertFalse(any("--variant random_29" in command for command in plan))
+
     def test_shard_setup_includes_both_preflight_gates(self):
         shard = shard_commands(["qwen05"], include_setup=True)
         self.assertIn(

@@ -9,7 +9,6 @@ from experiments.revision_full.protocol import (
     DEFAULT_EVAL_BATCH_SIZE,
     DEFAULT_FORMAT_BATCH_SIZE,
     MODEL_SPECS,
-    RANDOM_ALLOCATIONS,
     RANDOM_CALIB_SEED,
     SCREEN_CALIB_SEEDS,
     SCREEN_SEEDS,
@@ -129,14 +128,18 @@ def commands():
             yield from state_cycle(model, RANDOM_CALIB_SEED, variant)
 
         if MODEL_SPECS[model]["role"] == "primary":
-            for allocation_id in range(RANDOM_ALLOCATIONS):
-                for prefix in ["random", "random_modules"]:
-                    variant = f"{prefix}_{allocation_id}"
-                    yield (
-                        "python experiments/revision_full/run.py evaluate-allocation "
-                        f"--model {model} --variant {variant} --calib-seed {RANDOM_CALIB_SEED} "
-                        f"--batch-size {DEFAULT_EVAL_BATCH_SIZE}"
-                    )
+            for family, prefix in [
+                ("layer", "random"),
+                ("module", "random_modules"),
+            ]:
+                yield (
+                    "for allocation_id in $(python experiments/revision_full/run.py "
+                    f"allocation-ids --model {model} --family {family}); do "
+                    "python experiments/revision_full/run.py evaluate-allocation "
+                    f"--model {model} --variant {prefix}_${{allocation_id}} "
+                    f"--calib-seed {RANDOM_CALIB_SEED} "
+                    f"--batch-size {DEFAULT_EVAL_BATCH_SIZE}; done"
+                )
 
         yield from state_cycle(
             model,

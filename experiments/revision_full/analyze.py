@@ -29,6 +29,7 @@ from experiments.revision_full.protocol import (
     PROTOCOL_VERSION,
     STATE_METADATA_DIR,
     method_id,
+    validate_random_allocation_manifest,
 )
 
 
@@ -448,13 +449,20 @@ def analyze() -> dict:
         except FileNotFoundError:
             continue
         sg_accuracy = 100 * sum(sg.values()) / GSM8K_TEST_SIZE
+        selection = json.loads(
+            (OUT / "selections" / f"{model_key}.json").read_text(encoding="utf-8")
+        )
+        random_counts = validate_random_allocation_manifest(
+            selection.get("random_allocation_manifest", {})
+        )
         for prefix, allocation_kind in [
             ("random", "layer"),
             ("random_modules", "module"),
         ]:
+            required_count = random_counts[allocation_kind]
             random_accuracies = []
             missing = []
-            for allocation_id in range(RANDOM_ALLOCATIONS):
+            for allocation_id in range(required_count):
                 random_method = method_id(
                     f"{prefix}_{allocation_id}", RANDOM_CALIB_SEED
                 )
@@ -478,7 +486,8 @@ def analyze() -> dict:
                     "model": spec["display_name"],
                     "allocation_kind": allocation_kind,
                     "calibration_seed": RANDOM_CALIB_SEED,
-                    "required_random_allocations": RANDOM_ALLOCATIONS,
+                    "requested_random_allocations": RANDOM_ALLOCATIONS,
+                    "required_random_allocations": required_count,
                     "completed_random_allocations": len(random_accuracies),
                     "missing_allocation_ids": missing,
                     "sg_accuracy": sg_accuracy,
@@ -490,7 +499,7 @@ def analyze() -> dict:
                     "random_max": max(random_accuracies),
                     "sg_percentile": percentile,
                     "empirical_one_sided_p": empirical_p,
-                    "evidence_complete": len(random_accuracies) == RANDOM_ALLOCATIONS,
+                    "evidence_complete": len(random_accuracies) == required_count,
                 }
             else:
                 summary = {
@@ -498,7 +507,8 @@ def analyze() -> dict:
                     "model": spec["display_name"],
                     "allocation_kind": allocation_kind,
                     "calibration_seed": RANDOM_CALIB_SEED,
-                    "required_random_allocations": RANDOM_ALLOCATIONS,
+                    "requested_random_allocations": RANDOM_ALLOCATIONS,
+                    "required_random_allocations": required_count,
                     "completed_random_allocations": 0,
                     "missing_allocation_ids": missing,
                     "evidence_complete": False,
@@ -506,7 +516,10 @@ def analyze() -> dict:
             random_controls.append(summary)
 
     complete_random_controls = [
-        row for row in random_controls if row.get("empirical_one_sided_p") is not None
+        row
+        for row in random_controls
+        if row.get("evidence_complete") is True
+        and row.get("empirical_one_sided_p") is not None
     ]
     if complete_random_controls:
         corrected = holm_adjust(

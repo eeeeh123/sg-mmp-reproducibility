@@ -7,7 +7,7 @@ This pipeline is the only source for revised headline results. Historical GSM8K-
 - Canonical GSM8K evaluation is the direct 5-shot greedy evaluator on all 1,319 official test examples. The lm-evaluation-harness broad table intentionally excludes GSM8K, so the revision cannot silently produce two headline GSM8K numbers.
 - Sensitivity selection uses three disjoint 256-item train-only screens (768 unique development items in total); every model gets a native selection.
 - Calibration robustness uses three fixed seeds: `41, 97, 193`. This is the preregistered lower bound for “several” independent calibration runs; run-level and example-level uncertainty remain mandatory.
-- Core baselines include GPTQ-W4, uniform GPTQ-W5, uniform GPTQ-W6, SG-MMP, 30 matched random-layer allocations, and 30 matched random-module allocations for every primary model.
+- Core baselines include GPTQ-W4, uniform GPTQ-W5, uniform GPTQ-W6, SG-MMP, up to 30 matched random-layer allocations, and 30 matched random-module allocations for every primary model. If fewer than 30 distinct whole-layer placements are mathematically feasible, the exhaustive feasible set is locked and reported without duplicates.
 - Module controls include pure q/k/v, o, and FFN curves; budget-matched role-priority controls; and a calibration-weighted diagonal-Hessian reconstruction control.
 - Statistical analysis includes paired example inference, two-stage seed/example bootstrap intervals, Holm correction, random-allocation percentiles, and a paired format-by-method interaction.
 - Selection stability includes a fixed-seed 2,000-replicate bootstrap over the three disjoint train-screen units, with per-layer inclusion rates and set-level Jaccard; its three-unit limitation must be reported.

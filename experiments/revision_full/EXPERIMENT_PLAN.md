@@ -15,7 +15,7 @@ Historical GSM8K-300/500 runs are exploratory provenance. They must not be poole
 3. Selection stability: 2,000 fixed-seed bootstrap resamples of the three split-level units. Report inclusion probabilities, exact-set rate, Jaccard interval, and the limitation of having only three split units.
 4. Canonical accuracy: direct five-shot greedy generation on all 1,319 official GSM8K test examples, with `max_new_tokens=256` and one locked per-GPU batch size.
 5. Calibration robustness: every model runs GPTQ-W4, uniform GPTQ-W5, uniform GPTQ-W6, and SG-MMP for all three calibration seeds.
-6. Same-budget controls: each primary model runs 30 unique preregistered random-layer and 30 unique preregistered random-module allocations at seed 41. Allocation lists and hashes are stored before evaluation.
+6. Same-budget controls: each primary model requests 30 unique preregistered random-layer and 30 unique preregistered random-module allocations at seed 41. If a model admits fewer than 30 distinct whole-layer placements at the locked budget, all feasible placements are exhaustively enumerated and the model-specific count and feasibility certificate are stored. Allocation lists and hashes are stored before evaluation; allocations are never duplicated to reach 30.
 7. Placement controls: every model runs pure q/k/v, output-projection, and FFN precision curves plus budget-matched q/k/v-priority, output-priority, FFN-priority, and diagonal-Hessian reconstruction allocations.
 8. Format/task controls at seed 41: FP16, GPTQ-W4, and SG-MMP run the identical 1,319 GSM8K items as both free generation and deterministic four-choice scoring. They also run ARC-Challenge, HellaSwag, MMLU, MMLU high-school mathematics, generative SVAMP, generative ASDiv, MATH-500, and TruthfulQA generation.
 9. Causal diagnostic: Qwen2.5-0.5B uses a fixed, model-output-independent 200-item test subset. Aligned FP16 outputs replace GPTQ-W4 block, self-attention, or MLP outputs at every layer. The primary outcome is gold final-answer-token NLL; full reasoning-trace NLL/logit similarity/KL are secondary. Holm correction is applied separately to the primary and secondary NLL families. This is diagnostic, not generated-answer accuracy.
@@ -37,7 +37,7 @@ Historical GSM8K-300/500 runs are exploratory provenance. They must not be poole
 | SG-MMP improves W4 | Positive full-test paired delta, CI excluding zero, and adjusted McNemar p below 0.05 |
 | Robust to calibration | Three complete seed runs and the hierarchical interval; wording follows observed heterogeneity |
 | Not merely extra precision | Direct W5/W6 accuracy-versus-bit comparisons and matched internal placement controls |
-| Learned placement matters | Complete 30+30 unique random controls plus role/Hessian matched controls |
+| Learned placement matters | Complete the locked random controls (up to 30 exhaustive layer placements plus 30 module placements) and role/Hessian matched controls |
 | Format contributes | Corrected same-item generation-versus-MCQ interaction |
 | Transfers beyond one benchmark | Full locked task panels with FP16/W4/SG and relative-error reporting |
 | Mechanistic propagation | Complete block/attention/MLP patching with corrected final-answer outcome; otherwise remove causal language |
@@ -50,7 +50,7 @@ Historical GSM8K-300/500 runs are exploratory provenance. They must not be poole
 |---|---|
 | `protocol_lock.json` | `revision-full-v4`, frozen dataset hash, full test, three calibration-repeated GPTQ screens, execution batch/token lock |
 | dataset/model manifests | Immutable model revisions plus weight hashes; every core/panel dataset cache file fingerprinted and available offline |
-| screens/selections | Exactly one baseline and every native layer per split; 30+30 unique allocation manifests |
+| screens/selections | Exactly one baseline and every native layer per split; requested/actual allocation counts, uniqueness, hashes, and any exhaustive layer-feasibility certificate |
 | canonical/format samples | Exactly IDs 0-1318 once, valid correctness fields, v4 provenance, locked batch settings |
 | panel records | Exact task set, no second GSM8K evaluator, full logged samples for generative tasks |
 | causal record | Exactly 200 fixed IDs and every block/attention/MLP-by-layer pair |

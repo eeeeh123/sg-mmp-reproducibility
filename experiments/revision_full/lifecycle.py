@@ -26,6 +26,7 @@ from experiments.revision_full.protocol import (
     method_id,
     state_metadata_path,
     state_path,
+    validate_random_allocation_manifest,
 )
 
 
@@ -334,10 +335,22 @@ def bank_consumer_variants(model_key: str, calib_seed: int) -> list[str]:
     if calib_seed == RANDOM_CALIB_SEED:
         variants.extend(CONTROL_VARIANTS)
         if MODEL_SPECS[model_key]["role"] == "primary":
-            for allocation_id in range(RANDOM_ALLOCATIONS):
-                variants.extend(
-                    [f"random_{allocation_id}", f"random_modules_{allocation_id}"]
+            counts = {"layer": RANDOM_ALLOCATIONS, "module": RANDOM_ALLOCATIONS}
+            try:
+                selection = _read_json(OUT / "selections" / f"{model_key}.json")
+                counts = validate_random_allocation_manifest(
+                    selection.get("random_allocation_manifest", {})
                 )
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                pass
+            variants.extend(
+                f"random_{allocation_id}"
+                for allocation_id in range(counts["layer"])
+            )
+            variants.extend(
+                f"random_modules_{allocation_id}"
+                for allocation_id in range(counts["module"])
+            )
     return variants
 
 

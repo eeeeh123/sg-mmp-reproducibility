@@ -4,11 +4,11 @@ This guide is for `revision-full-v4`. Run commands from the repository root. Do 
 
 ## Capacity and realistic duration
 
-The frozen plan contains 523 commands, including 100 fail-closed state/bank/screen cleanup checkpoints. The expensive work is not the cleanup:
+The generated plan contains 349 top-level shell steps; six model/family loops expand from each locked selection manifest so an exhaustively smaller layer-allocation family is handled without nonexistent jobs. State/bank/screen cleanup remains fail-closed. The expensive work is not the cleanup:
 
 - 81,408 train-only generations for native layer screening;
 - 105,520 complete-test generations for 80 FP16/core/placement runs;
-- 237,420 complete-test generations for 180 preregistered random allocations;
+- up to 237,420 complete-test generations for 180 requested random allocations; a model with fewer than 30 feasible whole-layer placements uses its exhaustive distinct set and records the smaller actual count;
 - 15,828 same-item MCQ cases, each scoring four candidates;
 - 12 broad panels, 12 generative transfer panels, 12 precision-bank builds;
 - a 200-item teacher-forced diagnostic at every Qwen-0.5B layer for block, attention, and MLP interventions.

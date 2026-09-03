@@ -34,8 +34,8 @@ from experiments.revision_full.protocol import (
     SELECTION_BOOTSTRAP_REPLICATES,
     STATE_METADATA_DIR,
     method_id,
-    json_sha256,
     state_path,
+    validate_random_allocation_manifest,
 )
 from experiments.revision_full.download_core_datasets import (
     MANIFEST_PATH as DATASET_MANIFEST_PATH,
@@ -418,6 +418,10 @@ def core_errors() -> list[str]:
         "hessian_diag_matched",
     ]
     for model_key, spec in MODEL_SPECS.items():
+        random_counts = {
+            "layer": RANDOM_ALLOCATIONS,
+            "module": RANDOM_ALLOCATIONS,
+        }
         selection_path = OUT / "selections" / f"{model_key}.json"
         if not selection_path.exists():
             errors.append(f"missing native train-only selection for {model_key}")
@@ -504,20 +508,10 @@ def core_errors() -> list[str]:
                     expected_action="reconstructible_screen_state_deleted",
                 )
             random_manifest = selection.get("random_allocation_manifest", {})
-            layer_sets = random_manifest.get("layer_sets", [])
-            module_sets = random_manifest.get("module_sets", [])
-            if (
-                len(layer_sets) != RANDOM_ALLOCATIONS
-                or len({tuple(row) for row in layer_sets}) != RANDOM_ALLOCATIONS
-                or random_manifest.get("layer_sets_sha256") != json_sha256(layer_sets)
-            ):
-                errors.append(f"random-layer allocations are not 30 unique locked sets: {model_key}")
-            if (
-                len(module_sets) != RANDOM_ALLOCATIONS
-                or len({tuple(row) for row in module_sets}) != RANDOM_ALLOCATIONS
-                or random_manifest.get("module_sets_sha256") != json_sha256(module_sets)
-            ):
-                errors.append(f"random-module allocations are not 30 unique locked sets: {model_key}")
+            try:
+                random_counts = validate_random_allocation_manifest(random_manifest)
+            except (TypeError, ValueError) as exc:
+                errors.append(f"invalid random-allocation manifest for {model_key}: {exc}")
         require_complete_sample(errors, model_key, "fp16")
         for seed in CALIB_SEEDS:
             for variant in ["gptq_w4", "gptq_w5", "gptq_w6", "sg_mmp"]:
@@ -530,8 +524,11 @@ def core_errors() -> list[str]:
                 errors, model_key, method_id(variant, RANDOM_CALIB_SEED)
             )
         if spec["role"] == "primary":
-            for allocation_id in range(RANDOM_ALLOCATIONS):
-                for prefix in ["random", "random_modules"]:
+            for prefix, family in [
+                ("random", "layer"),
+                ("random_modules", "module"),
+            ]:
+                for allocation_id in range(random_counts[family]):
                     require_complete_sample(
                         errors,
                         model_key,

@@ -15,11 +15,13 @@ from experiments.revision_full.protocol import (
     average_bits,
     fixed_causal_patch_indices,
     make_disjoint_screen_splits,
+    make_random_layer_allocation_plan,
     make_unique_random_layer_allocations,
     make_unique_random_module_allocations,
     role_priority_budget_match,
     scored_budget_match,
     select_layers_under_budget,
+    validate_random_allocation_manifest,
 )
 from experiments.revision_full.server_preflight import (
     EXPECTED_VERSIONS,
@@ -173,6 +175,31 @@ class ProtocolTests(unittest.TestCase):
         matched = scored_budget_match(modules, target, scores)
         self.assertEqual(matched["actual_w8_params"], matched["target_w8_params"])
 
+    def test_scored_control_repairs_greedy_budget_gap_exactly(self):
+        modules = [
+            {"name": "a", "layer": 0, "short": "q_proj", "n_params": 6},
+            {"name": "b", "layer": 1, "short": "q_proj", "n_params": 4},
+            {"name": "c", "layer": 2, "short": "q_proj", "n_params": 3},
+        ]
+        target = {"b", "c"}
+        scores = {"a": 60.0, "b": 36.0, "c": 24.0}
+        matched = scored_budget_match(modules, target, scores)
+        self.assertEqual(matched["selected_module_names"], ["b", "c"])
+        self.assertEqual(matched["gap_params"], 0)
+        self.assertEqual(matched["exact_budget_removed_module_names"], ["a"])
+
+    def test_role_priority_control_repairs_infeasible_preferred_greedy_choice(self):
+        modules = [
+            {"name": "preferred", "layer": 0, "short": "o_proj", "n_params": 6},
+            {"name": "filler_a", "layer": 1, "short": "q_proj", "n_params": 4},
+            {"name": "filler_b", "layer": 2, "short": "q_proj", "n_params": 3},
+        ]
+        matched = role_priority_budget_match(
+            modules, {"filler_a", "filler_b"}, {"o_proj"}, seed=7
+        )
+        self.assertEqual(matched["selected_module_names"], ["filler_a", "filler_b"])
+        self.assertEqual(matched["gap_params"], 0)
+
     def test_random_controls_are_unique_deterministic_and_budget_matched(self):
         modules = [
             {
@@ -202,6 +229,92 @@ class ProtocolTests(unittest.TestCase):
             self.assertAlmostEqual(
                 average_bits(modules, set(selected)), target_bits, places=8
             )
+
+    def test_layer_random_controls_record_exhaustive_feasibility_shortfall(self):
+        modules = [
+            {
+                "name": f"model.layers.{layer}.{short}",
+                "layer": layer,
+                "short": short,
+                "n_params": 100,
+            }
+            for layer in range(24)
+            for short in ["q_proj", "o_proj"]
+        ]
+        target = {
+            row["name"]
+            for row in modules
+            if row["short"] == "q_proj" or row["layer"] == 0
+        }
+        plan = make_random_layer_allocation_plan(
+            modules, target, [0], count=30, seed=9
+        )
+        self.assertEqual(plan["actual_count"], 24)
+        self.assertTrue(plan["exhaustive"])
+        self.assertEqual(plan["feasible_candidate_sets"], 24)
+
+        module_sets = make_unique_random_module_allocations(
+            modules, target, count=30, seed=10
+        )
+        manifest = {
+            "requested_count_per_family": 30,
+            "count_per_family": 30,
+            "layer_feasibility": {
+                key: value for key, value in plan.items() if key != "sets"
+            },
+            "layer_sets": plan["sets"],
+            "module_sets": module_sets,
+            "layer_sets_sha256": protocol.json_sha256(plan["sets"]),
+            "module_sets_sha256": protocol.json_sha256(module_sets),
+        }
+        self.assertEqual(
+            validate_random_allocation_manifest(manifest),
+            {"layer": 24, "module": 30},
+        )
+
+    def test_zero_selected_layers_has_one_honest_random_layer_allocation(self):
+        modules = [
+            {
+                "name": f"model.layers.{layer}.q_proj",
+                "layer": layer,
+                "short": "q_proj",
+                "n_params": 100,
+            }
+            for layer in range(24)
+        ]
+        plan = make_random_layer_allocation_plan(
+            modules, {row["name"] for row in modules}, [], count=30, seed=9
+        )
+        self.assertEqual(plan["sets"], [[]])
+        self.assertTrue(plan["exhaustive"])
+
+    def test_legacy_full_random_manifest_remains_valid(self):
+        layer_sets = [[index] for index in range(30)]
+        module_sets = [[f"module.{index}"] for index in range(30)]
+        manifest = {
+            "count_per_family": 30,
+            "layer_sets": layer_sets,
+            "module_sets": module_sets,
+            "layer_sets_sha256": protocol.json_sha256(layer_sets),
+            "module_sets_sha256": protocol.json_sha256(module_sets),
+        }
+        self.assertEqual(
+            validate_random_allocation_manifest(manifest),
+            {"layer": 30, "module": 30},
+        )
+
+    def test_unproven_random_layer_shortfall_is_rejected(self):
+        layer_sets = [[index] for index in range(24)]
+        module_sets = [[f"module.{index}"] for index in range(30)]
+        manifest = {
+            "count_per_family": 30,
+            "layer_sets": layer_sets,
+            "module_sets": module_sets,
+            "layer_sets_sha256": protocol.json_sha256(layer_sets),
+            "module_sets_sha256": protocol.json_sha256(module_sets),
+        }
+        with self.assertRaisesRegex(ValueError, "feasibility certificate"):
+            validate_random_allocation_manifest(manifest)
 
     def test_two_gpu_storage_threshold_sums_concurrent_states(self):
         thresholds = storage_thresholds([9.90, 7.88, 6.41, 1.75], 2)

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
+import math
 import os
 import random
 from pathlib import Path
@@ -41,6 +43,7 @@ CALIB_LENGTH = 2048
 CALIB_HESSIAN_TOKENS = 4096
 TARGET_AVG_BITS = 5.0
 RANDOM_ALLOCATIONS = 30
+RANDOM_LAYER_ENUMERATION_LIMIT = 1_000_000
 RANDOM_CALIB_SEED = CALIB_SEEDS[0]
 GROUP_SIZE = 128
 DEFAULT_EVAL_BATCH_SIZE = int(os.environ.get("REVISION_FULL_EVAL_BATCH_SIZE", "4"))
@@ -138,6 +141,96 @@ def json_sha256(value) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def make_random_layer_allocation_plan(
+    module_rows: list[dict],
+    target_w8_names: set[str],
+    selected_layers: list[int],
+    count: int = RANDOM_ALLOCATIONS,
+    seed: int = 20261001,
+) -> dict:
+    """Pre-register up to ``count`` feasible, distinct layer allocations.
+
+    When fewer than ``count`` whole-layer placements exist, keep every
+    feasible placement and record the exhaustive shortfall. Duplicating a
+    placement would inflate the apparent random-control sample size.
+    """
+    qkv_names = {
+        row["name"] for row in module_rows if row["short"] in QKV_SHORT_NAMES
+    }
+    target_params = sum(
+        int(row["n_params"])
+        for row in module_rows
+        if row["name"] in target_w8_names
+    )
+    all_layers = sorted({int(row["layer"]) for row in module_rows})
+    layer_count = len(selected_layers)
+    if not 0 <= layer_count <= len(all_layers):
+        raise ValueError("selected_layers must define a feasible allocation")
+    if count <= 0:
+        raise ValueError("count must be positive")
+
+    def is_matched(candidate: tuple[int, ...]) -> bool:
+        names = qkv_names | {
+            row["name"]
+            for row in module_rows
+            if int(row["layer"]) in candidate
+            and row["short"] not in QKV_SHORT_NAMES
+        }
+        actual_params = sum(
+            int(row["n_params"])
+            for row in module_rows
+            if row["name"] in names
+        )
+        return actual_params == target_params
+
+    rng = random.Random(seed)
+    total_candidate_sets = math.comb(len(all_layers), layer_count)
+    exhaustive = total_candidate_sets <= RANDOM_LAYER_ENUMERATION_LIMIT
+    candidates: list[tuple[int, ...]] = []
+    feasible_candidate_sets: int | None = None
+    if exhaustive:
+        feasible = [
+            candidate
+            for candidate in itertools.combinations(all_layers, layer_count)
+            if is_matched(candidate)
+        ]
+        feasible_candidate_sets = len(feasible)
+        rng.shuffle(feasible)
+        candidates = feasible[:count]
+    else:
+        seen: set[tuple[int, ...]] = set()
+        attempts = 0
+        while len(candidates) < count and attempts < 200_000:
+            attempts += 1
+            candidate = tuple(sorted(rng.sample(all_layers, layer_count)))
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if is_matched(candidate):
+                candidates.append(candidate)
+
+    if not candidates:
+        raise RuntimeError("Could not construct any matched layer allocation")
+    if len(candidates) < count and not exhaustive:
+        raise RuntimeError(
+            f"Could only construct {len(candidates)}/{count} distinct matched layer "
+            "allocations without exhausting the search space"
+        )
+    return {
+        "requested_count": count,
+        "actual_count": len(candidates),
+        "exhaustive": exhaustive and len(candidates) < count,
+        "total_candidate_sets": total_candidate_sets,
+        "feasible_candidate_sets": feasible_candidate_sets,
+        "shortfall_reason": (
+            "fewer distinct whole-layer allocations are mathematically feasible"
+            if len(candidates) < count
+            else None
+        ),
+        "sets": [list(candidate) for candidate in candidates],
+    }
+
+
 def make_unique_random_layer_allocations(
     module_rows: list[dict],
     target_w8_names: set[str],
@@ -145,39 +238,71 @@ def make_unique_random_layer_allocations(
     count: int = RANDOM_ALLOCATIONS,
     seed: int = 20261001,
 ) -> list[list[int]]:
-    """Pre-register distinct layer allocations at the SG-MMP W8 budget."""
-    qkv_names = {
-        row["name"] for row in module_rows if row["short"] in QKV_SHORT_NAMES
-    }
-    target_bits = average_bits(module_rows, target_w8_names)
-    all_layers = sorted({int(row["layer"]) for row in module_rows})
-    layer_count = len(selected_layers)
-    if not 0 < layer_count <= len(all_layers):
-        raise ValueError("selected_layers must define a non-empty feasible allocation")
+    """Compatibility wrapper returning the locked layer sets."""
+    return make_random_layer_allocation_plan(
+        module_rows, target_w8_names, selected_layers, count=count, seed=seed
+    )["sets"]
+
+
+def _exact_budget_subset(
+    module_rows: list[dict],
+    budget_params: int,
+    priorities: dict[str, tuple[float, ...]],
+    seed: int,
+) -> set[str]:
+    """Find the lexicographically best subset at an exact parameter budget."""
+    if budget_params < 0:
+        raise ValueError("budget_params cannot be negative")
+    if budget_params == 0:
+        return set()
+    rows = sorted(module_rows, key=lambda row: row["name"])
+    if not rows:
+        raise RuntimeError("No modules are available for a positive W8 budget")
+    if len({row["name"] for row in rows}) != len(rows):
+        raise ValueError("Module names must be unique")
+    divisor = math.gcd(
+        budget_params,
+        *[int(row["n_params"]) for row in rows],
+    )
+    normalized_budget = budget_params // divisor
     rng = random.Random(seed)
-    allocations: list[list[int]] = []
-    seen: set[tuple[int, ...]] = set()
-    attempts = 0
-    while len(allocations) < count and attempts < 200_000:
-        attempts += 1
-        candidate = tuple(sorted(rng.sample(all_layers, layer_count)))
-        if candidate in seen:
+    tie_values = [rng.random() for _ in rows]
+    width = max((len(value) for value in priorities.values()), default=1)
+    zero_objective = (0.0,) * width
+    states: dict[int, tuple[tuple[float, ...], float, int]] = {
+        0: (zero_objective, 0.0, 0)
+    }
+    for index, row in enumerate(rows):
+        weight = int(row["n_params"]) // divisor
+        if weight <= 0 or weight > normalized_budget:
             continue
-        names = qkv_names | {
-            row["name"]
-            for row in module_rows
-            if int(row["layer"]) in candidate
-            and row["short"] not in QKV_SHORT_NAMES
-        }
-        if abs(average_bits(module_rows, names) - target_bits) > 0.01:
-            continue
-        seen.add(candidate)
-        allocations.append(list(candidate))
-    if len(allocations) != count:
+        value = priorities.get(row["name"], zero_objective)
+        if len(value) != width:
+            raise ValueError("Every priority tuple must have the same width")
+        for subtotal, (objective, tie, mask) in list(states.items()):
+            candidate_weight = subtotal + weight
+            if candidate_weight > normalized_budget:
+                continue
+            candidate = (
+                tuple(left + right for left, right in zip(objective, value)),
+                tie + tie_values[index],
+                mask | (1 << index),
+            )
+            incumbent = states.get(candidate_weight)
+            if incumbent is None or (candidate[0], candidate[1], -candidate[2]) > (
+                incumbent[0],
+                incumbent[1],
+                -incumbent[2],
+            ):
+                states[candidate_weight] = candidate
+    if normalized_budget not in states:
         raise RuntimeError(
-            f"Could only construct {len(allocations)}/{count} distinct matched layer allocations"
+            f"No exact module allocation exists at the {budget_params}-parameter W8 budget"
         )
-    return allocations
+    mask = states[normalized_budget][2]
+    return {
+        row["name"] for index, row in enumerate(rows) if mask & (1 << index)
+    }
 
 
 def make_unique_random_module_allocations(
@@ -186,8 +311,7 @@ def make_unique_random_module_allocations(
     count: int = RANDOM_ALLOCATIONS,
     seed: int = 20262001,
 ) -> list[list[str]]:
-    """Pre-register distinct module allocations within 0.01 average bit."""
-    target_bits = average_bits(module_rows, target_w8_names)
+    """Pre-register distinct module allocations at the exact SG W8 budget."""
     target_params = sum(
         int(row["n_params"])
         for row in module_rows
@@ -197,21 +321,14 @@ def make_unique_random_module_allocations(
     allocations: list[list[str]] = []
     seen: set[tuple[str, ...]] = set()
     attempts = 0
-    while len(allocations) < count and attempts < 500_000:
+    while len(allocations) < count and attempts < 10_000:
         attempts += 1
-        candidates = list(module_rows)
-        rng.shuffle(candidates)
-        chosen: set[str] = set()
-        used = 0
-        for row in candidates:
-            size = int(row["n_params"])
-            if used + size <= target_params:
-                chosen.add(row["name"])
-                used += size
+        priorities = {row["name"]: (rng.random(),) for row in module_rows}
+        chosen = _exact_budget_subset(
+            module_rows, target_params, priorities, seed + attempts
+        )
         key = tuple(sorted(chosen))
         if not key or key in seen:
-            continue
-        if abs(average_bits(module_rows, chosen) - target_bits) > 0.01:
             continue
         seen.add(key)
         allocations.append(list(key))
@@ -275,33 +392,6 @@ def average_bits(module_rows: list[dict], w8_names: set[str]) -> float:
     return (8 * w8 + 4 * (total - w8)) / total
 
 
-def _best_subset_under_budget(
-    module_rows: list[dict], budget_params: int, seed: int, attempts: int = 5000
-) -> set[str]:
-    """Deterministically approximate the largest module subset under a budget."""
-    if budget_params <= 0 or not module_rows:
-        return set()
-    best: set[str] = set()
-    best_total = 0
-    rng = random.Random(seed)
-    for _ in range(attempts):
-        candidates = list(module_rows)
-        rng.shuffle(candidates)
-        chosen: set[str] = set()
-        total = 0
-        for row in candidates:
-            size = int(row["n_params"])
-            if total + size <= budget_params:
-                chosen.add(row["name"])
-                total += size
-        if total > best_total:
-            best = chosen
-            best_total = total
-            if total == budget_params:
-                break
-    return best
-
-
 def role_priority_budget_match(
     module_rows: list[dict],
     target_w8_names: set[str],
@@ -318,16 +408,19 @@ def role_priority_budget_match(
     target_params = sum(
         int(row["n_params"]) for row in module_rows if row["name"] in target_w8_names
     )
-    preferred = [row for row in module_rows if row["short"] in preferred_shorts]
-    filler = [row for row in module_rows if row["short"] not in preferred_shorts]
-
-    chosen_preferred = _best_subset_under_budget(preferred, target_params, seed)
-    preferred_params = sum(
-        int(row["n_params"]) for row in preferred if row["name"] in chosen_preferred
-    )
-    remaining = target_params - preferred_params
-    chosen_filler = _best_subset_under_budget(filler, remaining, seed + 1)
-    selected = chosen_preferred | chosen_filler
+    priorities = {
+        row["name"]: (
+            float(int(row["n_params"])) if row["short"] in preferred_shorts else 0.0,
+        )
+        for row in module_rows
+    }
+    selected = _exact_budget_subset(module_rows, target_params, priorities, seed)
+    chosen_preferred = {
+        row["name"]
+        for row in module_rows
+        if row["name"] in selected and row["short"] in preferred_shorts
+    }
+    chosen_filler = selected - chosen_preferred
     actual_params = sum(
         int(row["n_params"]) for row in module_rows if row["name"] in selected
     )
@@ -344,7 +437,7 @@ def role_priority_budget_match(
 def scored_budget_match(
     module_rows: list[dict], target_w8_names: set[str], scores: dict[str, float]
 ) -> dict:
-    """Greedily allocate W8 by score-per-parameter under the SG budget."""
+    """Allocate W8 by score density and repair to the exact SG budget."""
     target_params = sum(
         int(row["n_params"]) for row in module_rows if row["name"] in target_w8_names
     )
@@ -362,21 +455,72 @@ def scored_budget_match(
         if used + size <= target_params:
             selected.add(row["name"])
             used += size
-    remaining_rows = [row for row in module_rows if row["name"] not in selected]
-    filler = _best_subset_under_budget(
-        remaining_rows, target_params - used, seed=20264001
+    greedy_selected = set(selected)
+    priorities = {
+        row["name"]: (
+            float(int(row["n_params"])) if row["name"] in greedy_selected else 0.0,
+            float(scores.get(row["name"], 0.0)),
+        )
+        for row in module_rows
+    }
+    selected = _exact_budget_subset(
+        module_rows, target_params, priorities, seed=20264001
     )
-    selected |= filler
     used = sum(
         int(row["n_params"]) for row in module_rows if row["name"] in selected
     )
     return {
         "selected_module_names": sorted(selected),
-        "budget_filler_module_names": sorted(filler),
+        "greedy_score_density_module_names": sorted(greedy_selected),
+        "exact_budget_added_module_names": sorted(selected - greedy_selected),
+        "exact_budget_removed_module_names": sorted(greedy_selected - selected),
+        "allocation_algorithm": "greedy_score_density_with_exact_budget_repair",
         "target_w8_params": target_params,
         "actual_w8_params": used,
         "gap_params": target_params - used,
     }
+
+
+def validate_random_allocation_manifest(manifest: dict) -> dict[str, int]:
+    """Validate legacy and feasibility-aware random-allocation manifests."""
+    requested = int(
+        manifest.get(
+            "requested_count_per_family",
+            manifest.get("count_per_family", -1),
+        )
+    )
+    if requested != RANDOM_ALLOCATIONS:
+        raise ValueError("random-allocation requested count does not match the protocol")
+    counts: dict[str, int] = {}
+    for family, key in (("layer", "layer_sets"), ("module", "module_sets")):
+        rows = manifest.get(key, [])
+        if not isinstance(rows, list) or not rows:
+            raise ValueError(f"random-{family} allocation list is empty")
+        canonical = [tuple(row) for row in rows]
+        if len(set(canonical)) != len(canonical):
+            raise ValueError(f"random-{family} allocations are not unique")
+        if manifest.get(f"{key}_sha256") != json_sha256(rows):
+            raise ValueError(f"random-{family} allocation hash is invalid")
+        if any(list(row) != sorted(set(row)) for row in rows):
+            raise ValueError(f"random-{family} allocation members are not canonical")
+        counts[family] = len(rows)
+    if counts["module"] != requested:
+        raise ValueError("random-module allocation count is incomplete")
+    if counts["layer"] > requested:
+        raise ValueError("random-layer allocation count exceeds the requested count")
+    if counts["layer"] < requested:
+        feasibility = manifest.get("layer_feasibility", {})
+        if (
+            feasibility.get("exhaustive") is not True
+            or int(feasibility.get("requested_count", -1)) != requested
+            or int(feasibility.get("actual_count", -1)) != counts["layer"]
+            or int(feasibility.get("feasible_candidate_sets", -1))
+            != counts["layer"]
+        ):
+            raise ValueError(
+                "random-layer shortfall lacks an exhaustive feasibility certificate"
+            )
+    return counts
 
 
 def select_layers_under_budget(
