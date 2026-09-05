@@ -460,8 +460,11 @@ class ServerPlanLifecycleTests(unittest.TestCase):
         dynamic = [command for command in plan if "allocation-ids" in command]
         self.assertEqual(len(dynamic), 6)
         self.assertTrue(
-            all("for allocation_id in $(python " in command for command in dynamic)
+            all("allocation_ids=$(python " in command for command in dynamic)
         )
+        self.assertTrue(all(
+            "for allocation_id in $allocation_ids;" in command for command in dynamic
+        ))
         self.assertFalse(any("--variant random_29" in command for command in plan))
 
     def test_shard_setup_includes_both_preflight_gates(self):

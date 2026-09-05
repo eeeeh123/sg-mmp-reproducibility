@@ -1,7 +1,10 @@
 """CPU smoke tests for the resource-aware revision quantization path."""
 
+import json
+import shutil
 import unittest
-from unittest.mock import patch
+import uuid
+from unittest.mock import Mock, patch
 
 import torch
 import torch.nn as nn
@@ -16,6 +19,7 @@ from ptq.quant.gptq import (
 )
 from ptq.quant.mixed_precision import compose_precision_state
 from ptq.eval import run_eval_on_model
+from experiments.revision_full import protocol
 
 
 class _TinyTokenizer:
@@ -66,6 +70,85 @@ class _ChoiceModel(nn.Module):
         vocabulary = torch.arange(16, device=input_ids.device).float()
         logits = input_ids.unsqueeze(-1).float() * 0.01 + vocabulary
         return SimpleNamespace(logits=logits)
+
+
+class _GenerationInputs(dict):
+    def to(self, device):
+        return self
+
+
+class SampleResumeTests(unittest.TestCase):
+    def setUp(self):
+        from experiments.fix_gsm8k_500 import direct_eval
+
+        self.direct = direct_eval
+        self.root = protocol.OUT / f".test_sample_resume_{uuid.uuid4().hex}"
+        self.root.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, self.root)
+        self.path = self.root / "samples.jsonl"
+        self.row = {
+            "doc_id": 0, "correct": 1, "protocol_version": protocol.PROTOCOL_VERSION,
+            "dataset_manifest_sha256": "data", "model_revision": "model",
+            "eval_batch_size_per_gpu": 2, "max_new_tokens": 256,
+        }
+        self.examples = [{"question": f"question {i}", "answer": "#### 2"} for i in range(3)]
+        for item in [
+            patch.object(direct_eval, "sample_path", return_value=self.path),
+            patch.object(direct_eval, "fixed_indices", return_value=[0, 1, 2]),
+            patch.object(direct_eval, "get_dataset", return_value=([], self.examples)),
+            patch.object(direct_eval, "ROW_METADATA", {
+                key: self.row[key] for key in
+                ["protocol_version", "dataset_manifest_sha256", "model_revision"]
+            }),
+            patch.object(direct_eval, "status"),
+            patch.object(direct_eval, "cleanup_gpu"),
+        ]:
+            item.start()
+            self.addCleanup(item.stop)
+
+    def save(self, rows):
+        self.path.write_text(
+            "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+        )
+        return self.path.read_bytes()
+
+    def test_partial_samples_append_only_missing_ids_and_keep_existing_bytes(self):
+        before = self.save([self.row])
+        tokenizer = Mock(eos_token_id=99, pad_token_id=0)
+        tokenizer.return_value = _GenerationInputs(input_ids=torch.ones((2, 2), dtype=torch.long))
+        tokenizer.batch_decode.return_value = ["#### 2", "#### 2"]
+        model = SimpleNamespace(
+            device="cpu", generate=Mock(return_value=torch.tensor([[1, 1, 2, 99]] * 2))
+        )
+        with (
+            patch.object(self.direct, "load_model", return_value=(model, tokenizer)),
+            patch.object(self.direct, "build_fewshot", return_value=""),
+            patch.object(self.direct, "build_model_prompts", return_value=["q1", "q2"]) as prompts,
+            patch.object(self.direct, "summarize_one"),
+            patch.object(torch.cuda, "is_available", return_value=False),
+        ):
+            self.direct.evaluate("smollm", "random_0__c41", 3, 2, 256)
+        self.assertEqual(prompts.call_args.args[-1], ["question 1", "question 2"])
+        self.assertTrue(self.path.read_bytes().startswith(before))
+        rows = self.direct.read_jsonl(self.path)
+        self.assertEqual([row["doc_id"] for row in rows], [0, 1, 2])
+        self.assertEqual(rows[0], self.row)
+        model.generate.assert_called_once()
+
+    def test_duplicate_or_incompatible_samples_are_rejected_without_append(self):
+        for rows in [
+            [self.row, self.row],
+            [{**self.row, "dataset_manifest_sha256": "changed"}],
+            [{**self.row, "model_revision": "changed"}],
+            [{**self.row, "eval_batch_size_per_gpu": 4}],
+            [{**self.row, "max_new_tokens": 128}],
+        ]:
+            with self.subTest(rows=rows), patch.object(self.direct, "load_model") as load:
+                before = self.save(rows)
+                with self.assertRaisesRegex(RuntimeError, "do not append mixed evidence"):
+                    self.direct.evaluate("smollm", "random_0__c41", 3, 2, 256)
+                load.assert_not_called()
+                self.assertEqual(self.path.read_bytes(), before)
 
 
 class QuantizationPipelineTests(unittest.TestCase):

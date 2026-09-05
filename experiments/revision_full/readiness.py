@@ -516,7 +516,12 @@ def core_errors() -> list[str]:
         for seed in CALIB_SEEDS:
             for variant in ["gptq_w4", "gptq_w5", "gptq_w6", "sg_mmp"]:
                 require_complete_sample(errors, model_key, method_id(variant, seed))
-            for variant in bank_consumer_variants(model_key, seed):
+            try:
+                consumer_variants = bank_consumer_variants(model_key, seed)
+            except RuntimeError as exc:
+                errors.append(f"cannot verify bank consumers for {model_key}/c{seed}: {exc}")
+                consumer_variants = []
+            for variant in consumer_variants:
                 require_cleanup_receipt(errors, model_key, seed, variant)
             require_cleanup_receipt(errors, model_key, seed, "precision_bank")
         for variant in controls:

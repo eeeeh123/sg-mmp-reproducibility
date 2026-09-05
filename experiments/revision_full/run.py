@@ -851,6 +851,31 @@ def screen_model(
 
 def select_model(model_key: str) -> dict:
     lock = require_protocol()
+    path = OUT / "selections" / f"{model_key}.json"
+    if path.exists():
+        # Allocation ids are persistent result identities, not disposable draws.
+        # In particular, upgrading a sampler must not relabel completed evidence.
+        selection = selection_for(model_key)
+        current_hashes = {
+            str(split["split_id"]): json_sha256(
+                read_jsonl(screen_file(model_key, split["split_id"]))
+            )
+            for split in lock["screen_splits"]
+        }
+        if (
+            selection.get("screen_file_sha256") != current_hashes
+            or selection.get("screen_calibration_seeds")
+            != [int(split["calibration_seed"]) for split in lock["screen_splits"]]
+            or selection.get("screen_quantizer") != lock["screen_quantizer"]
+        ):
+            raise RuntimeError(
+                f"Locked selection screen evidence has changed: {path}. "
+                "Preserve existing results and inspect the mismatch; "
+                "do not overwrite the allocation manifest to resume."
+            )
+        status("selection_already_locked", model=model_key, path=str(path))
+        return selection
+
     split_rows: dict[int, list[dict]] = {}
     for split in lock["screen_splits"]:
         path = screen_file(model_key, split["split_id"])
@@ -1083,6 +1108,8 @@ def selection_for(model_key: str) -> dict:
     if not path.exists():
         raise RuntimeError(f"Run `select --model {model_key}` first")
     selection = read_json(path)
+    if selection.get("model_key") != model_key:
+        raise RuntimeError(f"Selection belongs to a different model: {path}")
     if selection.get("protocol_version") != PROTOCOL_VERSION:
         raise RuntimeError(f"Selection protocol is stale: {path}")
     if selection.get("test_data_used") is not False:

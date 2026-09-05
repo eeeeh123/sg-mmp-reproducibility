@@ -17,7 +17,6 @@ from experiments.revision_full.protocol import (
     MAX_NEW_TOKENS,
     OUT,
     PROTOCOL_VERSION,
-    RANDOM_ALLOCATIONS,
     RANDOM_CALIB_SEED,
     RESULTS_DIR,
     ROOT,
@@ -335,14 +334,16 @@ def bank_consumer_variants(model_key: str, calib_seed: int) -> list[str]:
     if calib_seed == RANDOM_CALIB_SEED:
         variants.extend(CONTROL_VARIANTS)
         if MODEL_SPECS[model_key]["role"] == "primary":
-            counts = {"layer": RANDOM_ALLOCATIONS, "module": RANDOM_ALLOCATIONS}
             try:
                 selection = _read_json(OUT / "selections" / f"{model_key}.json")
                 counts = validate_random_allocation_manifest(
                     selection.get("random_allocation_manifest", {})
                 )
-            except (OSError, TypeError, ValueError, json.JSONDecodeError):
-                pass
+            except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    f"Cannot verify bank consumers without a valid locked "
+                    f"random-allocation manifest for {model_key}; preserve the bank"
+                ) from exc
             variants.extend(
                 f"random_{allocation_id}"
                 for allocation_id in range(counts["layer"])

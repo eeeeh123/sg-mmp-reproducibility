@@ -133,12 +133,15 @@ def commands():
                 ("module", "random_modules"),
             ]:
                 yield (
-                    "for allocation_id in $(python experiments/revision_full/run.py "
-                    f"allocation-ids --model {model} --family {family}); do "
+                    "allocation_ids=$(python experiments/revision_full/run.py "
+                    f"allocation-ids --model {model} --family {family}) || exit $?\n"
+                    'test -n "$allocation_ids" || { '
+                    f'echo "Empty locked allocation ids: {model}/{family}" >&2; exit 1; }}\n'
+                    "for allocation_id in $allocation_ids; do "
                     "python experiments/revision_full/run.py evaluate-allocation "
                     f"--model {model} --variant {prefix}_${{allocation_id}} "
                     f"--calib-seed {RANDOM_CALIB_SEED} "
-                    f"--batch-size {DEFAULT_EVAL_BATCH_SIZE}; done"
+                    f"--batch-size {DEFAULT_EVAL_BATCH_SIZE} || exit $?; done"
                 )
 
         yield from state_cycle(

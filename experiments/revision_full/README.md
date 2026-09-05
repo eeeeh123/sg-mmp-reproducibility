@@ -67,6 +67,31 @@ fail-closed: incomplete GSM8K IDs, missing panels, or a missing causal diagnosti
 keeps the required state. A normal rerun checks complete evidence before looking
 for a state, so already-cleaned work is not recomputed.
 
+### Resuming an existing run
+
+Keep `outputs/` intact, including selections, screens, state metadata, cleanup
+receipts, and samples. Repeating `select` validates and reuses the saved selection
+byte-for-byte; it does not redraw or renumber random allocations. A changed
+screen, provenance, or invalid manifest stops the run for inspection instead of
+overwriting the locked experiment. Missing or invalid random manifests also
+block precision-bank cleanup.
+
+After updating code, regenerate the GPU shard scripts before restarting a stopped
+worker. The allocation-id lookup and every random evaluation must succeed; an
+empty or failed lookup now stops the shard instead of silently skipping a family.
+Do not edit scripts or update code under active workers, and do not launch a
+second worker for the same model. Check the current run's log filename, timestamp,
+and Python processes first: an exception in an older log does not identify a new
+failure. For example, the September 3 repaired run used `gpu0_bf674b8.log` and
+`gpu1_bf674b8.log`, not the earlier `gpu0.log` and `gpu1.log`.
+
+Without `--force`, compatible complete results are skipped; canonical GSM8K
+generation resumes missing document IDs after validating existing rows. This is
+artifact/sample-level resumption, not a universal in-memory checkpoint: an
+interrupted builder or an evaluation panel without sample-level resume may need
+to rerun that stage. Do not use `prepare --force`, delete selections/results, or
+relax bit-budget gates to resume an existing run.
+
 ## Error analysis and causal diagnostic
 
 After W4 and SG-MMP seed-41 generations exist for a primary model:
