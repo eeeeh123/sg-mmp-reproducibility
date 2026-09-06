@@ -189,6 +189,19 @@ def hierarchical_seed_example_bootstrap(
         ]
         draws.append(100 * sampled.mean(axis=(1, 2)))
     draws = np.sort(np.concatenate(draws))
+    # The same test items recur across calibration seeds.  For a model-level
+    # null test, average each item's effect across seeds and flip signs at the
+    # item (cluster) level.  This avoids treating the seeds as independent
+    # claims or the seed-by-item cells as independent observations.
+    item_effects = differences.mean(axis=0)
+    observed = abs(float(item_effects.mean()))
+    extreme = 0
+    for start in range(0, iters, 250):
+        batch = min(250, iters - start)
+        signs = rng.choice((-1.0, 1.0), size=(batch, GSM8K_TEST_SIZE))
+        permuted = np.abs((signs * item_effects).mean(axis=1))
+        extreme += int((permuted >= observed).sum())
+    sign_flip_p = (extreme + 1) / (iters + 1)
     return {
         "n_seeds": seed_count,
         "n_examples_per_seed": GSM8K_TEST_SIZE,
@@ -203,6 +216,7 @@ def hierarchical_seed_example_bootstrap(
             float(draws[int(0.025 * iters)]),
             float(draws[int(0.975 * iters)]),
         ],
+        "paired_item_cluster_sign_flip_p": sign_flip_p,
         "resampling": "calibration seeds, then paired examples within seed",
     }
 
@@ -667,25 +681,95 @@ def analyze() -> dict:
         from experiments.revision_full.external_baselines import validate
 
         validate()
-    for metadata_path in external_metadata_paths:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        model_key = metadata["model_key"]
-        method = metadata["method_id"]
-        sg_method = method_id("sg_mmp", RANDOM_CALIB_SEED)
-        external = correctness(model_key, method)
-        sg = correctness(model_key, sg_method)
-        external_baselines.append(
-            {
-                **metadata,
-                "external_vs_sg": paired(external, sg),
-            }
-        )
-    if external_baselines:
+    external_records = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in external_metadata_paths
+    ]
+    grouped_external: dict[tuple[str, str], list[dict]] = {}
+    for metadata in external_records:
+        grouped_external.setdefault(
+            (metadata["model_key"], metadata["method"]), []
+        ).append(metadata)
+    for (model_key, external_method), records in sorted(grouped_external.items()):
+        seeded = {
+            int(record["calibration_seed"]): record
+            for record in records
+            if record.get("calibration_seed") is not None
+        }
+        if external_method == "tacq":
+            if set(seeded) != set(CALIB_SEEDS):
+                # Partial registrations remain visible to readiness, but do not
+                # create a selectively reported scientific comparison.
+                continue
+            diagnostics = []
+            pairs = []
+            for calib_seed in CALIB_SEEDS:
+                record = seeded[calib_seed]
+                external = correctness(model_key, record["method_id"])
+                sg = correctness(model_key, method_id("sg_mmp", calib_seed))
+                diagnostics.append(
+                    {
+                        "calibration_seed": calib_seed,
+                        "sg_minus_tacq": paired(external, sg),
+                        "inference_role": "diagnostic; not an independent primary hypothesis",
+                    }
+                )
+                pairs.append((external, sg))
+            primary = hierarchical_seed_example_bootstrap(
+                pairs,
+                seed=20269600 + sorted(MODEL_SPECS).index(model_key),
+            )
+            external_baselines.append(
+                {
+                    "model_key": model_key,
+                    "model": records[0]["model"],
+                    "method": external_method,
+                    "method_label": "TaCQ shared-backend adaptation",
+                    "calibration_seeds": list(CALIB_SEEDS),
+                    "parameter_weighted_average_bits": [
+                        seeded[seed]["parameter_weighted_average_bits"]
+                        for seed in CALIB_SEEDS
+                    ],
+                    "sg_parameter_weighted_average_bits": [
+                        seeded[seed]["sg_parameter_weighted_average_bits"]
+                        for seed in CALIB_SEEDS
+                    ],
+                    "seed_diagnostics": diagnostics,
+                    "model_level_sg_minus_tacq": primary,
+                    "primary_hypothesis": True,
+                }
+            )
+        else:
+            # Non-preregistered or single-run external methods are diagnostic
+            # only and are never mixed into the two-hypothesis TaCQ family.
+            for record in records:
+                seed = record.get("calibration_seed") or RANDOM_CALIB_SEED
+                external_baselines.append(
+                    {
+                        **record,
+                        "external_vs_sg": paired(
+                            correctness(model_key, record["method_id"]),
+                            correctness(model_key, method_id("sg_mmp", seed)),
+                        ),
+                        "primary_hypothesis": False,
+                    }
+                )
+    primary_tacq = [
+        row for row in external_baselines if row.get("primary_hypothesis") is True
+    ]
+    if primary_tacq:
+        if len(primary_tacq) != 2:
+            raise RuntimeError(
+                "Primary TaCQ inference requires exactly two complete model-level comparisons"
+            )
         corrected = holm_adjust(
-            [row["external_vs_sg"]["mcnemar_p_exact"] for row in external_baselines]
+            [
+                row["model_level_sg_minus_tacq"]["paired_item_cluster_sign_flip_p"]
+                for row in primary_tacq
+            ]
         )
-        for row, value in zip(external_baselines, corrected):
-            row["external_vs_sg"]["mcnemar_p_holm_family"] = value
+        for row, value in zip(primary_tacq, corrected):
+            row["model_level_sg_minus_tacq"]["paired_item_cluster_sign_flip_p_holm_two_models"] = value
 
     result = {
         "protocol_version": PROTOCOL_VERSION,
@@ -780,18 +864,35 @@ def analyze() -> dict:
         [
             "## External matched-budget baselines",
             "",
-            "| Model | Method | Avg bits | SG minus external | 95% paired CI | Holm p |",
-            "|---|---|---:|---:|---|---:|",
+            "Primary TaCQ inference aggregates three calibration seeds within each model. Per-seed paired tests are diagnostics; Holm correction covers exactly the two model-level hypotheses.",
+            "",
+            "| Model | Method | Avg bits by seed | SG minus external | Hierarchical 95% CI | Holm p (2 models) |",
+            "|---|---|---|---:|---|---:|",
         ]
     )
     for row in external_baselines:
-        comp = row["external_vs_sg"]
-        lines.append(
-            f"| {row['model']} | {row['method']} | {row['parameter_weighted_average_bits']:.3f} | "
-            f"{comp['delta']:+.2f} | "
-            f"[{comp['paired_bootstrap_ci95'][0]:+.2f}, {comp['paired_bootstrap_ci95'][1]:+.2f}] | "
-            f"{comp['mcnemar_p_holm_family']:.4g} |"
-        )
+        if row.get("primary_hypothesis"):
+            comp = row["model_level_sg_minus_tacq"]
+            bits = ", ".join(
+                f"c{seed}:{value:.3f}"
+                for seed, value in zip(
+                    row["calibration_seeds"],
+                    row["parameter_weighted_average_bits"],
+                )
+            )
+            lines.append(
+                f"| {row['model']} | {row['method_label']} | {bits} | "
+                f"{comp['mean_delta']:+.2f} | "
+                f"[{comp['ci95'][0]:+.2f}, {comp['ci95'][1]:+.2f}] | "
+                f"{comp['paired_item_cluster_sign_flip_p_holm_two_models']:.4g} |"
+            )
+        else:
+            comp = row["external_vs_sg"]
+            lines.append(
+                f"| {row['model']} | {row['method']} (diagnostic) | "
+                f"{row['parameter_weighted_average_bits']:.3f} | {comp['delta']:+.2f} | "
+                f"[{comp['paired_bootstrap_ci95'][0]:+.2f}, {comp['paired_bootstrap_ci95'][1]:+.2f}] | NA |"
+            )
     if not external_baselines:
         lines.append("| Not registered | NA | NA | NA | NA | NA |")
     lines.append("")

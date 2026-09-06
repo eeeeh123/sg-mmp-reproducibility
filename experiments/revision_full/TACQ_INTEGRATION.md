@@ -1,49 +1,80 @@
-# TaCQ and established automated mixed-precision baseline integration
+# Shadow-gated TaCQ shared-backend adaptation
 
-TaCQ is deliberately isolated from the main environment because its official repository specifies Python 3.12.2/CUDA and a separate dependency stack. The revision pipeline does not reimplement TaCQ or relabel the internal diagonal-Hessian heuristic as TaCQ/HAWQ-V2.
+This add-on does not modify or rerun the 52 immutable core sample files. It
+addresses two separate questions in a fail-closed order:
 
-## Reproducibility lock
+1. Does generated-only early stopping preserve the historical evaluator's
+   answer prefix, prediction, and correctness exactly?
+2. Under the same eligible projection scope and a non-exceeding ±0.01-bit
+   logical budget, does a TaCQ allocation outperform or underperform SG-MMP?
 
-- Official repository: `https://github.com/The-Inscrutable-X/TACQ`
-- Commit pinned on 2026-09-01: `cfc4cccfb6b7d6f7d184c9fbc8f9373c3e74569a`
-- Run the official code in a separate environment on the laboratory server.
-- Save the exact command, configuration, environment/package lock, model revision, calibration source/seed, selected precision allocation, and parameter-weighted average bit width.
+The comparison must be called **TaCQ shared-backend adaptation**. The TaCQ
+importance formula is retained, while the GPTQ-W4 group-128 backend and direct
+GSM8K evaluator are shared with SG-MMP for controlled comparison. The actual
+serialized state includes redundant W4 values beneath the FP16 exception mask;
+therefore the experiment supports allocation-quality claims, not deployment
+speed or physical-memory claims.
 
-The official scripts currently demonstrate larger Llama/Qwen models. Adapting a primary model is allowed only by changing model-specific loading/configuration while preserving the official TaCQ importance and allocation procedure. Record every adaptation in the imported config; do not describe an approximate local surrogate as TaCQ.
+## Frozen source and adaptation
 
-Use only GSM8K train and/or the locked WikiText calibration data for importance and allocation. Test questions, test labels, and v4 test generations are forbidden inputs. Tune the official preservation ratio without looking at test accuracy until the measured parameter-weighted budget is within 0.05 bit of that model's frozen SG-MMP budget. Record every tried ratio so budget matching cannot become hidden test-set tuning.
+- Official source: `https://github.com/The-Inscrutable-X/TACQ`
+- Pinned commit: `cfc4cccfb6b7d6f7d184c9fbc8f9373c3e74569a`
+- Models: Qwen2.5-0.5B and Qwen2.5-1.5B
+- Calibration seeds: 41, 97, 193
+- Importance: 128 deterministically selected GSM8K-train examples (the official
+  default scale), batch 1, full causal loss, per-example absolute gradients,
+  float32 sum, no normalization
+- The clean gradient accumulator is computed once per model. Each seed uses its
+  own locked GPTQ-W4 perturbation and therefore its own score/mask.
+- Allocation: global element-level W4/FP16 mask. The FP16 count is the largest
+  integer count that does not exceed the model's frozen SG-MMP logical budget.
+  Equal scores are resolved by module name and row-major index.
+- No importance count, loss, normalization, mask rule, bit rounding, or other
+  TaCQ setting may change after the manifest is written or after inspecting a
+  TaCQ test output.
 
-TaCQ importance arrays can be checkpoint-sized. Run one model at a time on scratch. After canonical samples, the full config/environment lock, measured bit accounting, and hashes are registered, the importance arrays and temporary checkpoints are reconstructible and may be removed.
+## Gates
 
-## Canonical evaluation contract
+`shadow_gate.py prepare` freezes 50 archived IDs per model. W4 and SG each
+replay those IDs, for 200 formal shadow generations. `verify` writes `PASS.json`
+only when all 200 canonical answer prefixes, extracted predictions, and
+correctness labels match the immutable old outputs exactly. The prompt is never
+scanned by the stop processor. A failed gate forbids TaCQ test evaluation.
 
-After TaCQ produces a quantized model/state, evaluate it with the same direct 5-shot greedy GSM8K evaluator used by `run.py evaluate-full`. Export a JSONL file containing exactly one row for each `doc_id` 0-1318. Required fields match the auditable direct evaluator:
+`tacq.py freeze` then records every adaptation degree, input identity, model and
+dataset provenance, Shadow receipt, budget rule, and statistical plan. Gradient
+capture is checkpointed every 32 train examples. Each seed must subsequently
+pass formula/module/finite-score/mask/budget checks and a state save-reload plus
+32-generation train-only smoke test before the 1,319-item test command is
+available.
 
-```json
-{"doc_id": 0, "question": "...", "gold": "...", "prediction": null, "correct": 0, "generation": "...", "generated_token_count": 256, "truncated": true}
-```
-
-Use the same prompt construction, answer extractor, maximum generation length, official GSM8K test ordering, and model chat/raw prompt style as the internal methods. Do not import an accuracy number without per-example generations. Copy `external_baseline_config.template.json`, fill every provenance/adaptation/data/budget field, and record exact parameter counts per bit width; registration recomputes the reported average bit width.
-
-## Registration
-
-Once the model's SG-MMP selection exists, register the official result:
+Generate two conservative one-GPU plans. Run the TaCQ plan only after the
+Shadow plan exits successfully and `readiness --stage shadow` reports
+`"ready": true`:
 
 ```bash
-python experiments/revision_full/external_baselines.py register \
-  --model qwen05 \
-  --method tacq \
-  --average-bits <measured_parameter_weighted_bits> \
-  --samples <canonical_1319_jsonl> \
-  --source-url https://github.com/The-Inscrutable-X/TACQ \
-  --source-commit cfc4cccfb6b7d6f7d184c9fbc8f9373c3e74569a \
-  --config <completed_external_config.json>
+python experiments/revision_full/make_tacq_plan.py --phase shadow > server_plans/shadow_gate.sh
+python experiments/revision_full/make_tacq_plan.py --phase tacq > server_plans/tacq_serial.sh
+bash -n server_plans/shadow_gate.sh
+bash -n server_plans/tacq_serial.sh
 ```
 
-Registration fails unless all item IDs and required fields exist and the reported budget is within 0.05 bit of SG-MMP. It copies and hashes both samples and configuration. Validate before analysis:
+The TaCQ plan rechecks the Shadow receipt at its boundary. It skips a seed only
+when its validated registration exists; otherwise it resumes the seed from its
+validated artifacts. Do not use `--force` after any downstream test output
+exists.
 
-```bash
-python experiments/revision_full/external_baselines.py validate
-```
+## Statistical contract
 
-The resubmission gate requires both TaCQ and HAWQ-V2 registrations for `qwen05` and `qwen15`. The official HAWQ repository is `https://github.com/zhen-dong/hawq`; clone it in an isolated environment and record the actual `git rev-parse HEAD`. Its released pipeline targets convolutional models and is not a drop-in causal-LM evaluator. An LLM adaptation may be registered only if it preserves HAWQ-V2's Hessian-aware automated precision-allocation rule, uses no GSM8K test information, records every model-specific change, reports actual bit accounting, and exports the canonical JSONL contract. Describe it as an adaptation where appropriate rather than implying an unmodified official LLM implementation. Register it with `--method hawq_v2`. Do not relabel the internal diagonal-Hessian placement control as HAWQ-V2.
+Each seed retains paired bootstrap and exact McNemar results as diagnostics.
+They are not six independent scientific hypotheses. The primary inference is
+one SG-minus-TaCQ effect per model using the same two-stage calibration-seed /
+paired-example bootstrap as the core SG-minus-W4 analysis. A paired-item
+cluster sign-flip test supplies the model-level p-value, and Holm correction is
+applied to exactly the two model-level hypotheses.
+
+`readiness.py --stage tacq` checks all six registrations, both model-level
+effects, the three diagnostic seeds per model, the two-test Holm family, the
+manifest, the Shadow receipt, and both bit ledgers. HAWQ-V2 and human error
+taxonomy are explicitly not claimed; no internal surrogate is relabelled as an
+external method.

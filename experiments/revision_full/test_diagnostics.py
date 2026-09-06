@@ -155,6 +155,19 @@ class DiagnosticTests(unittest.TestCase):
                             "n": 1319,
                             "decoding": "greedy",
                             "max_new_tokens": 256,
+                            "online_stop": "generated-question-marker-v1",
+                        },
+                        "calibration_seed": 41,
+                        "adaptation_freeze": {
+                            "importance_train_samples": 128,
+                            "importance_batch_size": 1,
+                            "gradient_accumulation": "sum abs",
+                            "importance_normalization": "none",
+                            "mask_granularity": "element",
+                            "tie_breaking": "index",
+                            "budget_rounding": "floor",
+                            "importance_recomputed_per_calibration_seed": False,
+                            "hyperparameters_frozen_before_test": True,
                         },
                     }
                 ),
@@ -167,6 +180,7 @@ class DiagnosticTests(unittest.TestCase):
                 source_commit="a" * 40,
                 average_bits=5.0,
                 expected_parameter_count=100,
+                calibration_seed=41,
             )
             self.assertEqual(config["parameter_weighted_average_bits"], 5.0)
         finally:

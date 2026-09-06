@@ -116,17 +116,23 @@ This diagnostic may support a mechanistic statement only if its corrected infere
 
 ## External baselines and final gates
 
-TaCQ and HAWQ-V2 must run from their official implementations in isolated environments and be imported through the canonical result contract described in `TACQ_INTEGRATION.md`. Registration rejects incomplete samples, missing provenance, and bit budgets differing from SG-MMP by more than 0.05 bit. The resubmission gate requires both methods on Qwen2.5-0.5B and Qwen2.5-1.5B; they are reviewer-mandated and are not removed by the resource-aware internal-matrix reduction.
+The accepted add-on is the shadow-gated **TaCQ shared-backend adaptation** described in `TACQ_INTEGRATION.md`. It uses the official pinned TaCQ importance rule, the shared locked GPTQ-W4 backend, three calibration seeds, and a non-exceeding 0.01-bit logical budget match. HAWQ-V2 is not run and no surrogate is renamed HAWQ-V2. Human error taxonomy is also waived, so the paper must not claim manually established error types; the existing automatic audit remains descriptive evidence only.
 
 ```bash
+python experiments/revision_full/make_tacq_plan.py --phase shadow > server_plans/shadow_gate.sh
+python experiments/revision_full/make_tacq_plan.py --phase tacq > server_plans/tacq_serial.sh
+python experiments/revision_full/readiness.py --stage shadow
 python experiments/revision_full/external_baselines.py validate
 python experiments/revision_full/analyze.py
 python experiments/revision_full/readiness.py --stage core
+python experiments/revision_full/readiness.py --stage tacq
 python experiments/revision_full/readiness.py --stage resubmission
 ```
 
 - `core` requires all preregistered internal numerical experiments.
-- `resubmission` additionally requires registered official TaCQ and HAWQ-V2 results and completed blinded error annotation.
+- `shadow` requires exact 200/200 evaluator equivalence without modifying core outputs.
+- `tacq` requires six seed-level registrations but exactly two model-level primary hypotheses.
+- `resubmission` additionally enforces the explicit HAWQ/human-label claim waivers.
 
 ## Result replacement policy
 

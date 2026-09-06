@@ -1489,6 +1489,9 @@ def configure_direct_eval(
 ):
     import experiments.fix_gsm8k_500.direct_eval as direct
 
+    # Core v4 rows retain their historical generation contract.  The
+    # shadow-validated online stop is enabled only by the TaCQ adapter.
+    direct.ONLINE_QUESTION_STOP = False
     method = method_id(variant, calib_seed)
     spec = MODEL_SPECS[model_key]
     direct.OUT = RESULTS_DIR / "runtime" / model_key

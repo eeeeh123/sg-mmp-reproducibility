@@ -628,88 +628,132 @@ def core_errors() -> list[str]:
     return errors
 
 
-def resubmission_errors() -> list[str]:
+def shadow_errors() -> list[str]:
     errors = core_errors()
+    try:
+        from experiments.revision_full.shadow_gate import (
+            RECEIPT_PATH,
+            require_manifest,
+        )
+
+        manifest = require_manifest()
+        receipt = json.loads(RECEIPT_PATH.read_text(encoding="utf-8"))
+        if (
+            receipt.get("pass") is not True
+            or receipt.get("errors")
+            or receipt.get("manifest_sha256") != manifest["manifest_sha256"]
+            or int(receipt.get("checks", {}).get("rows", -1)) != 200
+            or int(receipt.get("checks", {}).get("canonical_prefix_matches", -1))
+            != 200
+            or int(receipt.get("checks", {}).get("prediction_matches", -1)) != 200
+            or int(receipt.get("checks", {}).get("correctness_matches", -1)) != 200
+        ):
+            errors.append("question-stop shadow receipt is not an exact 200/200 PASS")
+    except (KeyError, OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        errors.append(f"invalid or missing question-stop shadow gate: {exc}")
+    return errors
+
+
+def tacq_errors() -> list[str]:
+    errors = shadow_errors()
+    try:
+        from experiments.revision_full.tacq import require_manifest
+
+        manifest = require_manifest()
+    except (KeyError, OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        errors.append(f"invalid or missing frozen TaCQ manifest: {exc}")
+        manifest = None
     for model_key in ["qwen05", "qwen15"]:
-        for external_method in ["tacq", "hawq_v2"]:
+        for calib_seed in CALIB_SEEDS:
             path = (
                 OUT
                 / "external_baselines"
-                / f"{model_key}__{external_method}.json"
+                / f"{model_key}__tacq__c{calib_seed}.json"
             )
             if not path.exists():
                 errors.append(
-                    f"missing official {external_method} baseline registration for {model_key}"
+                    f"missing TaCQ registration for {model_key}/c{calib_seed}"
                 )
                 continue
-            record = json.loads(path.read_text(encoding="utf-8"))
             try:
+                record = json.loads(path.read_text(encoding="utf-8"))
                 sample_file = resolve_record_path(record["samples"])
                 config_file = resolve_record_path(record["config"])
                 read_samples(sample_file)
                 if sha256(sample_file) != record["samples_sha256"]:
-                    errors.append(
-                        f"{external_method} sample hash mismatch for {model_key}"
-                    )
-                if not config_file.exists() or sha256(config_file) != record[
-                    "config_sha256"
+                    raise RuntimeError("sample hash mismatch")
+                if sha256(config_file) != record["config_sha256"]:
+                    raise RuntimeError("config hash mismatch")
+                if (
+                    record.get("protocol_version") != PROTOCOL_VERSION
+                    or record.get("method") != "tacq"
+                    or int(record.get("calibration_seed", -1)) != calib_seed
+                ):
+                    raise RuntimeError("registration identity mismatch")
+                validate_source("tacq", record["source_url"], record["source_commit"])
+                if manifest is not None and record["source_commit"] != manifest[
+                    "official_source_commit"
                 ]:
-                    errors.append(
-                        f"{external_method} config missing or changed for {model_key}"
+                    raise RuntimeError("source commit differs from frozen manifest")
+                selection = json.loads(
+                    (OUT / "selections" / f"{model_key}.json").read_text(
+                        encoding="utf-8"
                     )
-                if record.get("protocol_version") != PROTOCOL_VERSION:
-                    errors.append(
-                        f"stale {external_method} registration for {model_key}"
-                    )
-                if not record.get("source_url") or not record.get("source_commit"):
-                    errors.append(
-                        f"{external_method} provenance is incomplete for {model_key}"
-                    )
-                validate_source(
-                    external_method, record["source_url"], record["source_commit"]
                 )
                 validate_external_config(
                     config_file,
-                    method=external_method,
-                    model_revision=current_model_snapshot(model_key)[
-                        "resolved_revision"
-                    ],
+                    method="tacq",
+                    model_revision=current_model_snapshot(model_key)["resolved_revision"],
                     source_commit=record["source_commit"],
                     average_bits=float(record["parameter_weighted_average_bits"]),
                     expected_parameter_count=sum(
-                        int(row["n_params"])
-                        for row in json.loads(
-                            (OUT / "selections" / f"{model_key}.json").read_text(
-                                encoding="utf-8"
-                            )
-                        )["module_rows"]
+                        int(row["n_params"]) for row in selection["module_rows"]
                     ),
+                    calibration_seed=calib_seed,
                 )
+                config_payload = json.loads(config_file.read_text(encoding="utf-8"))
+                if manifest is not None and config_payload.get(
+                    "environment_lock", {}
+                ).get("manifest_sha256") != manifest["manifest_sha256"]:
+                    raise RuntimeError("config is not bound to the frozen TaCQ manifest")
+                gap = float(record["sg_parameter_weighted_average_bits"]) - float(
+                    record["parameter_weighted_average_bits"]
+                )
+                if not 0 <= gap <= 0.01:
+                    raise RuntimeError(f"non-matched/non-conservative bit gap {gap}")
             except (KeyError, OSError, RuntimeError, ValueError) as exc:
-                errors.append(
-                    f"invalid {external_method} registration for {model_key}: {exc}"
-                )
-    for model_key, spec in MODEL_SPECS.items():
-        if spec["role"] != "primary":
-            continue
-        path = (
-            RESULTS_DIR
-            / "error_analysis"
-            / f"{model_key}__c{RANDOM_CALIB_SEED}__blinded_annotation__summary.json"
-        )
-        if not path.exists():
-            errors.append(f"missing completed blinded error annotation summary for {model_key}")
-            continue
-        summary = json.loads(path.read_text(encoding="utf-8"))
-        if int(summary.get("consensus_labeled_cases", 0)) < 200:
-            errors.append(f"fewer than 200 consensus error labels for {model_key}")
-        if int(summary.get("double_coded_cases", 0)) < 40:
-            errors.append(f"fewer than 40 double-coded errors for {model_key}")
-        if int(summary.get("required_double_coded_cases", 0)) != 40:
-            errors.append(f"preregistered double-code set is not exactly 40 for {model_key}")
-        if not summary.get("per_method_consensus_counts"):
-            errors.append(f"error labels were not unblinded by method for {model_key}")
+                errors.append(f"invalid TaCQ registration {model_key}/c{calib_seed}: {exc}")
+    analysis_path = OUT / "analysis_full.json"
+    if analysis_path.exists():
+        analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+        primary = [
+            row
+            for row in analysis.get("external_baselines", [])
+            if row.get("method") == "tacq" and row.get("primary_hypothesis") is True
+        ]
+        if (
+            len(primary) != 2
+            or {row.get("model_key") for row in primary} != {"qwen05", "qwen15"}
+            or any(len(row.get("seed_diagnostics", [])) != 3 for row in primary)
+            or any(
+                "paired_item_cluster_sign_flip_p_holm_two_models"
+                not in row.get("model_level_sg_minus_tacq", {})
+                for row in primary
+            )
+        ):
+            errors.append("TaCQ analysis is not two model-level hypotheses over three seeds")
+    else:
+        errors.append("missing analysis after TaCQ registrations")
+    return errors
+
+
+def resubmission_errors() -> list[str]:
+    errors = tacq_errors()
     policy = json.loads(POLICY_PATH.read_text(encoding="utf-8"))
+    if policy.get("human_error_taxonomy_claim") != "waived_no_error_type_claims":
+        errors.append("human-label waiver is not explicit in claim policy")
+    if policy.get("hawq_v2_claim") != "not_run_not_claimed_no_surrogate_substitution":
+        errors.append("HAWQ-V2 omission is not explicit in claim policy")
     deployment = RESULTS_DIR / "deployment_metrics.json"
     if (
         policy.get("deployment_efficiency_claim")
@@ -722,11 +766,17 @@ def resubmission_errors() -> list[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stage", choices=["preflight", "core", "resubmission"], required=True)
+    parser.add_argument(
+        "--stage",
+        choices=["preflight", "core", "shadow", "tacq", "resubmission"],
+        required=True,
+    )
     args = parser.parse_args()
     errors = {
         "preflight": preflight_errors,
         "core": core_errors,
+        "shadow": shadow_errors,
+        "tacq": tacq_errors,
         "resubmission": resubmission_errors,
     }[args.stage]()
     report = {"stage": args.stage, "ready": not errors, "errors": errors}

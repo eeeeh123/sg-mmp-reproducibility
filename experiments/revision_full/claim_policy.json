@@ -4,6 +4,9 @@
   "broad_table_includes_gsm8k": false,
   "mechanistic_claim": "enabled_only_if_block_attention_mlp_final_answer_causal_gate_passes",
   "deployment_efficiency_claim": "disabled_until_packed_kernel_measurements_exist",
-  "external_baseline_claim": "enabled_only_if_official_tacq_and_hawq_v2_results_are_registered",
+  "external_baseline_claim": "enabled_only_for_shadow_validated_three_seed_tacq_shared_backend_adaptation",
+  "hawq_v2_claim": "not_run_not_claimed_no_surrogate_substitution",
+  "human_error_taxonomy_claim": "waived_no_error_type_claims",
+  "automatic_error_evidence": "descriptive_only_not_a_human_error_taxonomy",
   "legacy_300_500_headline_claims": "forbidden"
 }

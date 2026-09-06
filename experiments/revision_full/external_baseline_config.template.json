@@ -2,6 +2,7 @@
   "method": "tacq_or_hawq_v2",
   "source_commit": "FULL_40_CHARACTER_GIT_SHA",
   "model_revision": "FULL_40_CHARACTER_HUGGING_FACE_SHA",
+  "calibration_seed": 41,
   "test_data_used_for_selection": false,
   "calibration_and_selection_data": {
     "datasets": [
@@ -20,13 +21,24 @@
   "adaptations_from_official_source": [
     "LIST_EVERY_MODEL_OR_EVALUATOR_CHANGE"
   ],
+  "adaptation_freeze": {
+    "importance_train_samples": 128,
+    "importance_batch_size": 1,
+    "gradient_accumulation": "sum of per-example absolute gradients",
+    "importance_normalization": "none",
+    "mask_granularity": "global eligible-weight element",
+    "tie_breaking": "score descending, then deterministic global index",
+    "budget_rounding": "floor; never exceed SG logical budget",
+    "importance_recomputed_per_calibration_seed": false,
+    "hyperparameters_frozen_before_test": true
+  },
   "budget_search": {
     "candidate_settings_tried": [],
     "selection_rule": "closest budget without using test accuracy"
   },
   "bit_width_parameter_counts": {
     "4": 0,
-    "8": 0
+    "16": 0
   },
   "bit_accounting_scope": "exactly the eligible q/k/v/o/gate/up/down projection weights listed in the locked model selection",
   "parameter_weighted_average_bits": 0.0,
@@ -35,6 +47,7 @@
     "n": 1319,
     "prompt": "direct 5-shot",
     "decoding": "greedy",
-    "max_new_tokens": 256
+    "max_new_tokens": 256,
+    "online_stop": "generated-question-marker-v1"
   }
 }

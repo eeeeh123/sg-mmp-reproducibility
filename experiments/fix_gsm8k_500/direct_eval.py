@@ -471,6 +471,7 @@ def done_doc_ids(path: Path) -> set[int]:
 # Revision pipelines may attach immutable provenance without changing the
 # historical evaluator's CLI or legacy output schema.
 ROW_METADATA: dict = {}
+ONLINE_QUESTION_STOP = False
 
 
 @torch.no_grad()
@@ -493,6 +494,19 @@ def evaluate(model_key: str, method: str, n: int, batch_size: int, max_new_token
         "eval_batch_size_per_gpu": batch_size,
         "max_new_tokens": max_new_tokens,
     }
+    if ONLINE_QUESTION_STOP:
+        from experiments.revision_full.question_stop import (
+            BASE_GENERATION_KWARGS_SHA256,
+            STOP_PROTOCOL,
+        )
+
+        expected_metadata.update(
+            {
+                "online_question_stop": True,
+                "stop_protocol": STOP_PROTOCOL,
+                "base_generation_kwargs_sha256": BASE_GENERATION_KWARGS_SHA256,
+            }
+        )
     if (
         len(existing_rows) != len(existing_ids)
         or len(existing_ids) != len(set(existing_ids))
@@ -534,13 +548,23 @@ def evaluate(model_key: str, method: str, n: int, batch_size: int, max_new_token
         prompts = build_model_prompts(model_key, tok, train, prefix, [test[i]["question"] for i in batch_ids])
         enc = tok(prompts, return_tensors="pt", padding=True, truncation=False).to(model.device)
         input_len = enc["input_ids"].shape[1]
-        outputs = model.generate(
-            **enc,
-            do_sample=False,
-            max_new_tokens=max_new_tokens,
-            pad_token_id=tok.pad_token_id,
-            eos_token_id=tok.eos_token_id,
-        )
+        generation_kwargs = {
+            "do_sample": False,
+            "max_new_tokens": max_new_tokens,
+            "pad_token_id": tok.pad_token_id,
+            "eos_token_id": tok.eos_token_id,
+        }
+        if ONLINE_QUESTION_STOP:
+            from experiments.revision_full.question_stop import (
+                GeneratedQuestionStopLogitsProcessor,
+            )
+
+            generation_kwargs["logits_processor"] = [
+                GeneratedQuestionStopLogitsProcessor(
+                    tok, input_len, tok.eos_token_id
+                )
+            ]
+        outputs = model.generate(**enc, **generation_kwargs)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         gen_ids = outputs[:, input_len:]
@@ -549,16 +573,38 @@ def evaluate(model_key: str, method: str, n: int, batch_size: int, max_new_token
         for doc_id, gen_text, token_row in zip(batch_ids, decoded, gen_ids):
             ex = test[doc_id]
             gold = gold_answer(ex["answer"])
-            pred = extract_prediction(gen_text)
             token_ids = token_row.tolist()
-            eos_positions = [
-                index for index, token_id in enumerate(token_ids)
-                if token_id == tok.eos_token_id
-            ]
-            ended_with_eos = bool(eos_positions)
-            generated_token_count = (
-                eos_positions[0] + 1 if ended_with_eos else len(token_ids)
-            )
+            if ONLINE_QUESTION_STOP:
+                from experiments.revision_full.question_stop import (
+                    generation_diagnostics,
+                )
+
+                diagnostics = generation_diagnostics(
+                    gen_text,
+                    token_ids,
+                    eos_token_id=tok.eos_token_id,
+                    max_new_tokens=max_new_tokens,
+                )
+                scored_generation = diagnostics["generation"]
+            else:
+                eos_positions = [
+                    index
+                    for index, token_id in enumerate(token_ids)
+                    if token_id == tok.eos_token_id
+                ]
+                ended_with_eos = bool(eos_positions)
+                generated_token_count = (
+                    eos_positions[0] + 1 if ended_with_eos else len(token_ids)
+                )
+                diagnostics = {
+                    "generation": gen_text,
+                    "generated_token_count": generated_token_count,
+                    "ended_with_eos": ended_with_eos,
+                    "truncated": generated_token_count >= max_new_tokens
+                    and not ended_with_eos,
+                }
+                scored_generation = gen_text
+            pred = extract_prediction(scored_generation)
             rows.append(
                 {
                     **expected_metadata,
@@ -568,10 +614,7 @@ def evaluate(model_key: str, method: str, n: int, batch_size: int, max_new_token
                     "gold": gold,
                     "prediction": pred,
                     "correct": is_correct(pred, gold),
-                    "generation": gen_text,
-                    "generated_token_count": generated_token_count,
-                    "ended_with_eos": ended_with_eos,
-                    "truncated": generated_token_count >= max_new_tokens and not ended_with_eos,
+                    **diagnostics,
                 }
             )
         append_jsonl(out_path, rows)

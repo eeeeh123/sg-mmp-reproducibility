@@ -231,7 +231,7 @@ def apply_mixed_precision_to_model_gpu(
         qi = quant_state.pop(name)
         method = qi.get("method", "gptq_w4")
 
-        if method == "gptq_w4":
+        if method in {"gptq_w4", "tacq_w4_fp16"}:
             w_q = qi["w_q"].to(device)
             scale = qi["scale"].to(device)
             zero = qi["zero"].to(device)
@@ -245,6 +245,16 @@ def apply_mixed_precision_to_model_gpu(
                 s = scale[:, g:g+1].float()
                 z = zero[:, g:g+1].float()
                 w_deq[:, g_start:g_end] = (w_q[:, g_start:g_end].float() - z) * s
+            if method == "tacq_w4_fp16":
+                packed = qi["fp16_mask_packbits"].to(device=device, dtype=torch.int64)
+                shifts = torch.arange(7, -1, -1, device=device, dtype=torch.int64)
+                mask = ((packed[:, None] >> shifts[None, :]) & 1).reshape(-1)
+                mask = mask[: int(qi["mask_numel"])].bool()
+                values = qi["fp16_values"].to(device=device, dtype=torch.float16)
+                if int(mask.sum().item()) != int(values.numel()):
+                    raise RuntimeError(f"Invalid TaCQ exception mask for {name}")
+                w_deq.view(-1)[mask] = values
+                del packed, shifts, mask, values
             module.weight = nn.Parameter(w_deq, requires_grad=False)
             del qi, w_q, scale, zero, w_deq
 

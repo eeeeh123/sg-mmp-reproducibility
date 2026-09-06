@@ -20,6 +20,11 @@ from experiments.revision_full.protocol import (
     RESULTS_DIR,
     ROOT,
 )
+from experiments.revision_full.question_stop import (
+    BASE_GENERATION_KWARGS_SHA256,
+    STOP_PROTOCOL,
+    canonical_answer_prefix,
+)
 
 
 REGISTRY = OUT / "external_baselines"
@@ -114,6 +119,7 @@ def validate_external_config(
     source_commit: str,
     average_bits: float,
     expected_parameter_count: int | None = None,
+    calibration_seed: int | None = None,
 ) -> dict:
     if path.suffix.lower() != ".json":
         raise RuntimeError("External baseline config must be a machine-readable JSON file")
@@ -143,6 +149,25 @@ def validate_external_config(
         or config["test_data_used_for_selection"] is not False
     ):
         raise RuntimeError("External config method/source/model/test-separation mismatch")
+    if method == "tacq":
+        freeze = config.get("adaptation_freeze", {})
+        required_freeze = {
+            "importance_train_samples",
+            "importance_batch_size",
+            "gradient_accumulation",
+            "importance_normalization",
+            "mask_granularity",
+            "tie_breaking",
+            "budget_rounding",
+            "importance_recomputed_per_calibration_seed",
+            "hyperparameters_frozen_before_test",
+        }
+        if required_freeze - set(freeze):
+            raise RuntimeError("TaCQ config does not freeze every adaptation degree")
+        if freeze.get("hyperparameters_frozen_before_test") is not True:
+            raise RuntimeError("TaCQ hyperparameters were not frozen before test")
+        if int(config.get("calibration_seed", -1)) != int(calibration_seed or -1):
+            raise RuntimeError("TaCQ calibration seed mismatch")
     evaluator = config["canonical_evaluator"]
     if (
         evaluator.get("dataset") != "openai/gsm8k/main:test"
@@ -151,6 +176,8 @@ def validate_external_config(
         or int(evaluator.get("max_new_tokens", -1)) != 256
     ):
         raise RuntimeError("External config does not use the canonical evaluator")
+    if method == "tacq" and evaluator.get("online_stop") != STOP_PROTOCOL:
+        raise RuntimeError("TaCQ config lacks the shadow-validated online stop")
     counts = {
         int(bits): int(count)
         for bits, count in config["bit_width_parameter_counts"].items()
@@ -175,6 +202,42 @@ def validate_external_config(
     return config
 
 
+def validate_tacq_samples(
+    rows: list[dict], calibration_seed: int, manifest_sha256: str
+) -> None:
+    from experiments.fix_gsm8k_500.direct_eval import extract_prediction, is_correct
+
+    invalid = [
+        row.get("doc_id")
+        for row in rows
+        if row.get("online_question_stop") is not True
+        or row.get("stop_protocol") != STOP_PROTOCOL
+        or int(row.get("calibration_seed", -1)) != calibration_seed
+        or row.get("tacq_manifest_sha256") != manifest_sha256
+        or row.get("base_generation_kwargs_sha256")
+        != BASE_GENERATION_KWARGS_SHA256
+        or row.get("stop_reason")
+        not in {"generated_question_marker", "model_eos", "max_new_tokens"}
+        or not isinstance(row.get("raw_generation"), str)
+        or canonical_answer_prefix(str(row.get("raw_generation", ""))).text
+        != row.get("generation")
+        or extract_prediction(str(row.get("generation", "")))
+        != row.get("prediction")
+        or int(is_correct(row.get("prediction"), row.get("gold")))
+        != int(row.get("correct", -1))
+        or bool(row.get("truncated"))
+        != (row.get("stop_reason") == "max_new_tokens")
+        or bool(row.get("generated_question_marker_found"))
+        != (row.get("stop_reason") == "generated_question_marker")
+        or (
+            row.get("stop_reason") == "model_eos"
+            and row.get("ended_with_eos") is not True
+        )
+    ]
+    if invalid:
+        raise RuntimeError(f"TaCQ samples violate the stopped evaluator contract: {invalid[:5]}")
+
+
 def register(
     model_key: str,
     method: str,
@@ -183,6 +246,7 @@ def register(
     source_url: str,
     source_commit: str,
     config: Path,
+    calibration_seed: int | None = None,
 ) -> None:
     if model_key not in MODEL_SPECS:
         raise ValueError(f"unknown model: {model_key}")
@@ -190,19 +254,25 @@ def register(
         raise ValueError(f"method must be one of {sorted(ALLOWED_METHODS)}")
     if not 4.0 <= average_bits <= 8.0:
         raise ValueError("average bits must be in [4, 8]")
+    if method == "tacq" and calibration_seed not in (41, 97, 193):
+        raise ValueError("TaCQ requires --calib-seed in {41,97,193}")
+    if method != "tacq" and calibration_seed is not None:
+        raise ValueError("--calib-seed is currently defined only for TaCQ")
     validate_source(method, source_url, source_commit)
-    read_samples(samples)
+    sample_rows = read_samples(samples)
     if not config.exists():
         raise FileNotFoundError(config)
     from experiments.revision_full.run import selection_for
 
     selection = selection_for(model_key)
     sg_bits = float(selection["actual_avg_bits"])
-    if abs(average_bits - sg_bits) > 0.05:
+    tolerance = 0.01 if method == "tacq" else 0.05
+    if abs(average_bits - sg_bits) > tolerance:
         raise RuntimeError(
-            f"External baseline is not budget matched: {average_bits:.4f} vs SG {sg_bits:.4f}"
+            f"External baseline is not budget matched within {tolerance:.2f} bit: "
+            f"{average_bits:.4f} vs SG {sg_bits:.4f}"
         )
-    validate_external_config(
+    validated_config = validate_external_config(
         config,
         method=method,
         model_revision=selection["model_snapshot"]["resolved_revision"],
@@ -211,9 +281,20 @@ def register(
         expected_parameter_count=sum(
             int(row["n_params"]) for row in selection["module_rows"]
         ),
+        calibration_seed=calibration_seed,
     )
+    if method == "tacq":
+        validate_tacq_samples(
+            sample_rows,
+            int(calibration_seed),
+            str(validated_config["environment_lock"]["manifest_sha256"]),
+        )
 
-    method_id = f"external_{method}"
+    method_id = (
+        f"external_{method}__c{calibration_seed}"
+        if calibration_seed is not None
+        else f"external_{method}"
+    )
     destination = (
         RESULTS_DIR
         / "samples"
@@ -221,7 +302,12 @@ def register(
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
     copy_if_needed(samples, destination)
-    config_destination = REGISTRY / f"{model_key}__{method}__config{config.suffix}"
+    config_seed_suffix = (
+        f"__c{calibration_seed}" if calibration_seed is not None else ""
+    )
+    config_destination = (
+        REGISTRY / f"{model_key}__{method}{config_seed_suffix}__config{config.suffix}"
+    )
     config_destination.parent.mkdir(parents=True, exist_ok=True)
     copy_if_needed(config, config_destination)
     record = {
@@ -230,6 +316,7 @@ def register(
         "model": MODEL_SPECS[model_key]["display_name"],
         "method": method,
         "method_id": method_id,
+        "calibration_seed": calibration_seed,
         "parameter_weighted_average_bits": average_bits,
         "sg_parameter_weighted_average_bits": sg_bits,
         "canonical_evaluator": "direct 5-shot greedy, complete official GSM8K test set",
@@ -240,9 +327,10 @@ def register(
         "source_commit": source_commit,
         "config": portable_path(config_destination),
         "config_sha256": sha256(config_destination),
-        "config_schema": "external-baseline-v1",
+        "config_schema": "external-baseline-v2",
     }
-    output = REGISTRY / f"{model_key}__{method}.json"
+    suffix = f"__c{calibration_seed}" if calibration_seed is not None else ""
+    output = REGISTRY / f"{model_key}__{method}{suffix}.json"
     output.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(record, ensure_ascii=False, indent=2))
 
@@ -257,7 +345,7 @@ def validate() -> None:
             raise RuntimeError(f"Stale external baseline registration: {path}")
         validate_source(record["method"], record["source_url"], record["source_commit"])
         sample_path = resolve_record_path(record["samples"])
-        read_samples(sample_path)
+        sample_rows = read_samples(sample_path)
         if sha256(sample_path) != record["samples_sha256"]:
             raise RuntimeError(f"External sample hash changed: {sample_path}")
         config_path = resolve_record_path(record["config"])
@@ -268,7 +356,7 @@ def validate() -> None:
                 encoding="utf-8"
             )
         )
-        validate_external_config(
+        validated_config = validate_external_config(
             config_path,
             method=record["method"],
             model_revision=selection["model_snapshot"]["resolved_revision"],
@@ -277,7 +365,14 @@ def validate() -> None:
             expected_parameter_count=sum(
                 int(row["n_params"]) for row in selection["module_rows"]
             ),
+            calibration_seed=record.get("calibration_seed"),
         )
+        if record["method"] == "tacq":
+            validate_tacq_samples(
+                sample_rows,
+                int(record["calibration_seed"]),
+                str(validated_config["environment_lock"]["manifest_sha256"]),
+            )
         records.append(record)
     print(json.dumps({"registered": len(records), "records": records}, ensure_ascii=False, indent=2))
 
@@ -293,6 +388,7 @@ def main() -> None:
     item.add_argument("--source-url", required=True)
     item.add_argument("--source-commit", required=True)
     item.add_argument("--config", type=Path, required=True)
+    item.add_argument("--calib-seed", type=int)
     sub.add_parser("validate")
     args = parser.parse_args()
     if args.command == "register":
@@ -304,6 +400,7 @@ def main() -> None:
             args.source_url,
             args.source_commit,
             args.config,
+            args.calib_seed,
         )
     else:
         validate()

@@ -1,6 +1,6 @@
 # Rejection-revision experiment plan (revision-full-v4)
 
-Status: code-verified; GPU results, external baselines, and human annotation pending.
+Status: core complete; shadow-gated TaCQ add-on code-verified locally; server execution pending.
 
 ## Confirmatory question and separation rules
 
@@ -23,7 +23,7 @@ Historical GSM8K-300/500 runs are exploratory provenance. They must not be poole
 
 ## Statistical reporting
 
-- Primary paired comparison: accuracy difference, paired bootstrap 95% interval, exact McNemar test, and Holm adjustment across the predeclared model/seed family.
+- Core SG-W4 paired comparison follows the locked v4 analysis. For the TaCQ add-on, per-seed paired bootstrap/McNemar results are diagnostics only. The primary TaCQ inference aggregates all three seeds within each Qwen model using a two-stage seed/example bootstrap and a paired-item cluster sign-flip test; Holm adjustment covers exactly the two model-level hypotheses.
 - Calibration uncertainty: all three run deltas plus two-stage bootstrap over calibration seeds and paired examples; report mean, SD, minimum, maximum, and interval. Three seeds do not justify a universal invariance claim.
 - Quantization severity: absolute accuracy degradation, relative error increase, and normalized recovery against FP16. Cross-task values are descriptive unless item-level pairing exists.
 - Allocation evidence: SG percentile and empirical one-sided p-value against both 30-member null families. Missing or duplicate allocations disable the claim.
@@ -41,7 +41,7 @@ Historical GSM8K-300/500 runs are exploratory provenance. They must not be poole
 | Format contributes | Corrected same-item generation-versus-MCQ interaction |
 | Transfers beyond one benchmark | Full locked task panels with FP16/W4/SG and relative-error reporting |
 | Mechanistic propagation | Complete block/attention/MLP patching with corrected final-answer outcome; otherwise remove causal language |
-| Competitive with automated mixed precision | Official TaCQ and HAWQ-V2 results for Qwen 0.5B/1.5B, complete canonical samples, pinned code/config, and budget within 0.05 bit |
+| Competitive with automated mixed precision | Shadow-validated TaCQ shared-backend adaptation for Qwen 0.5B/1.5B, three calibration seeds, complete canonical samples, pinned code/config, and non-exceeding budget within 0.01 bit. HAWQ-V2 is not claimed. |
 | Deployment efficiency | Disabled until real packed-kernel size, peak memory, latency, and throughput exist |
 
 ## Required gates and artifacts
@@ -56,10 +56,12 @@ Historical GSM8K-300/500 runs are exploratory provenance. They must not be poole
 | causal record | Exactly 200 fixed IDs and every block/attention/MLP-by-layer pair |
 | lifecycle receipts | Evidence validated and hashed before each reconstructible state deletion |
 | `readiness.py --stage core` | Every preregistered internal computation complete |
-| `readiness.py --stage resubmission` | Core plus official external baselines and completed blinded annotations |
+| `readiness.py --stage shadow` | 200/200 historical-prefix, prediction, and correctness equivalence |
+| `readiness.py --stage tacq` | Six seed registrations, two model-level primary effects, and two-hypothesis Holm family |
+| `readiness.py --stage resubmission` | TaCQ gate plus explicit HAWQ-V2 and human-error-taxonomy claim waivers |
 
 The pipeline is fail closed: partial files, duplicate IDs, stale protocol/data/model provenance, changed batch settings, missing task samples, or an incomplete downstream consumer stop execution and preserve the needed state.
 
 ## What is not solved before server execution
 
-GPU memory behavior must still pass train-only smoke tests on the actual two RTX 3090 cards. Numerical claims remain unknown until the core runs complete. TaCQ produces large importance artifacts and HAWQ's official implementation is not natively an LLM pipeline, so their adaptations must be validated separately; neither may be replaced by the internal Hessian control. Human annotations can start only after new generations exist. These remaining items can be added without rerunning valid v4 core outputs because the canonical per-item evidence and provenance are retained.
+GPU memory behavior for the TaCQ adaptation must still pass save/reload and 32-generation train-only smoke gates on the actual RTX 3090 server. TaCQ importance checkpoints are large and are deleted only after all registered evidence is validated. HAWQ-V2 and human error-taxonomy claims are explicitly omitted. These add-on results do not rerun, pool with, or rewrite valid v4 core outputs.
