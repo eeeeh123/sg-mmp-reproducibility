@@ -5,15 +5,62 @@ import json
 import shutil
 import unittest
 import uuid
+from unittest.mock import patch
 
 import torch
 
+from experiments.revision_full import analyze as revision_analysis
 from experiments.revision_full import error_analysis, protocol
 from experiments.revision_full.causal_patch import target_metrics
 from experiments.revision_full.external_baselines import validate_external_config
 
 
 class DiagnosticTests(unittest.TestCase):
+    def test_module_control_rows_cover_each_model_variant_once(self):
+        root = protocol.OUT / f".test_analysis_{uuid.uuid4().hex}"
+        root.mkdir(parents=True)
+        variants = [
+            "qkv_only",
+            "o_only",
+            "ffn_only",
+            "qkv_priority_matched",
+            "o_priority_matched",
+            "ffn_priority_matched",
+            "hessian_diag_matched",
+        ]
+        models = {
+            "model_a": {"display_name": "Model A"},
+            "model_b": {"display_name": "Model B"},
+        }
+        try:
+            for model in models:
+                directory = root / model / f"calib_{protocol.RANDOM_CALIB_SEED}"
+                directory.mkdir(parents=True)
+                for variant in variants:
+                    (directory / f"{variant}.json").write_text(
+                        json.dumps({"parameter_weighted_average_bits": 4.9}),
+                        encoding="utf-8",
+                    )
+            with (
+                patch.object(revision_analysis, "MODEL_SPECS", models),
+                patch.object(revision_analysis, "STATE_METADATA_DIR", root),
+                patch.object(revision_analysis, "correctness", return_value={0: 1}),
+                patch.object(
+                    revision_analysis,
+                    "paired",
+                    return_value={"mcnemar_p_exact": 1.0},
+                ),
+            ):
+                rows = revision_analysis.module_placement_control_rows()
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+        self.assertEqual(len(rows), len(models) * len(variants))
+        self.assertEqual(
+            {(row["model_key"], row["variant"]) for row in rows},
+            {(model, variant) for model in models for variant in variants},
+        )
+
     def test_target_metrics_include_trace_and_final_answer_spans(self):
         logits = torch.zeros((1, 4, 5), dtype=torch.float32)
         input_ids = torch.tensor([[0, 1, 2, 3]])

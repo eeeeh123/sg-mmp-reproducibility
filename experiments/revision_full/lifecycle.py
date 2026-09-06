@@ -180,6 +180,36 @@ def extra_result_path(model_key: str, variant: str, calib_seed: int | None) -> P
     return RESULTS_DIR / "extra" / f"{model_key}__{method}.json"
 
 
+def logged_samples_complete(item: dict, expected_docs: int) -> bool:
+    """Accept one complete logged row per document and observed result filter."""
+    samples = item.get("samples", [])
+    try:
+        if (
+            expected_docs <= 0
+            or not samples
+            or int(item.get("n_samples", -1)) != len(samples)
+        ):
+            return False
+        expected_ids = set(range(expected_docs))
+        ids_by_filter: dict[str, set[int]] = {}
+        pairs = []
+        for sample in samples:
+            doc_id = int(sample["doc_id"])
+            filter_name = str(sample.get("filter", "none"))
+            ids_by_filter.setdefault(filter_name, set()).add(doc_id)
+            pairs.append((filter_name, doc_id))
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (
+        len(pairs) == len(set(pairs))
+        and all(ids == expected_ids for ids in ids_by_filter.values())
+    )
+
+
+def extra_task_complete(item: dict, expected_docs: int) -> bool:
+    return bool(item.get("metrics")) and logged_samples_complete(item, expected_docs)
+
+
 def extra_complete(model_key: str, variant: str, calib_seed: int | None) -> bool:
     path = extra_result_path(model_key, variant, calib_seed)
     try:
@@ -199,13 +229,22 @@ def extra_complete(model_key: str, variant: str, calib_seed: int | None) -> bool
         ):
             return False
         results = record.get("results", {})
+        manifest = _read_json(OUT / "dataset_snapshot_manifest.json")
+        expected_docs = {
+            task: int(
+                manifest.get("panels", {})
+                .get("tasks", {})
+                .get(task, {})
+                .get("evaluation_docs", -1)
+            )
+            for task in EXTRA_TASKS
+        }
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
         return False
     if set(results) != EXTRA_TASKS:
         return False
     for task in EXTRA_TASKS:
-        samples = results[task].get("samples", [])
-        if not samples or int(results[task].get("n_samples", -1)) != len(samples):
+        if not extra_task_complete(results[task], expected_docs[task]):
             return False
     return True
 

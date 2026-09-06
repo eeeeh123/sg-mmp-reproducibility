@@ -49,7 +49,11 @@ from experiments.revision_full.external_baselines import (
     validate_external_config,
     validate_source,
 )
-from experiments.revision_full.lifecycle import bank_consumer_variants, receipt_path
+from experiments.revision_full.lifecycle import (
+    bank_consumer_variants,
+    logged_samples_complete,
+    receipt_path,
+)
 
 
 POLICY_PATH = Path(__file__).with_name("claim_policy.json")
@@ -260,7 +264,6 @@ def require_task_panels(errors: list[str], model_key: str, method: str) -> None:
         return
     for task in EXTRA_TASKS:
         item = results[task]
-        samples = item.get("samples", [])
         metrics = item.get("metrics", {})
         expected_n = -1
         if DATASET_MANIFEST_PATH.exists():
@@ -271,11 +274,7 @@ def require_task_panels(errors: list[str], model_key: str, method: str) -> None:
                 .get(task, {})
                 .get("evaluation_docs", -1)
             )
-        if (
-            not samples
-            or int(item.get("n_samples", -1)) != len(samples)
-            or (expected_n > 0 and len(samples) != expected_n)
-        ):
+        if not logged_samples_complete(item, expected_n):
             errors.append(f"incomplete logged samples {model_key}/{method}/{task}")
         if not any(metric in metrics for metric in EXTRA_PRIMARY_METRICS[task]):
             errors.append(f"missing primary metric {model_key}/{method}/{task}")
@@ -607,18 +606,23 @@ def core_errors() -> list[str]:
                 or analysis.get("model_revisions") != expected_revisions
                 or analysis.get("execution") != expected_execution
                 or int(analysis.get("n", -1)) != GSM8K_TEST_SIZE
-                or len(analysis.get("comparisons", []))
-                != len(MODEL_SPECS) * len(CALIB_SEEDS)
-                or len(analysis.get("run_level_summary", [])) != len(MODEL_SPECS)
-                or len(analysis.get("same_item_format_controls", []))
-                != len(MODEL_SPECS)
-                or len(analysis.get("random_same_budget_controls", [])) != 6
-                or len(analysis.get("module_placement_controls", []))
-                != 7 * len(MODEL_SPECS)
-                or len(analysis.get("cross_task_format_controls", []))
-                != len(MODEL_SPECS) * (len(BROAD_TASKS) + len(EXTRA_TASKS))
             ):
-                errors.append("core analysis artifact is stale or incomplete")
+                errors.append("core analysis artifact provenance is stale")
+            expected_rows = {
+                "comparisons": len(MODEL_SPECS) * len(CALIB_SEEDS),
+                "run_level_summary": len(MODEL_SPECS),
+                "same_item_format_controls": len(MODEL_SPECS),
+                "random_same_budget_controls": 6,
+                "module_placement_controls": 7 * len(MODEL_SPECS),
+                "cross_task_format_controls": len(MODEL_SPECS)
+                * (2 + len(BROAD_TASKS) + len(EXTRA_TASKS)),
+            }
+            for section, expected in expected_rows.items():
+                actual = len(analysis.get(section, []))
+                if actual != expected:
+                    errors.append(
+                        f"incomplete core analysis {section}: {actual}/{expected}"
+                    )
         except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
             errors.append(f"invalid core analysis artifact: {exc}")
     return errors

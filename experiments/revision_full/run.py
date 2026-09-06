@@ -81,6 +81,7 @@ from experiments.revision_full.lifecycle import (
     broad_complete,
     cleanup_state_artifact,
     extra_complete,
+    extra_task_complete,
     gsm8k_complete,
     gsm8k_sample_path,
     state_consumers_complete,
@@ -1767,9 +1768,27 @@ def evaluate_extra(
         raise RuntimeError(
             f"Extra-panel metadata changed; inspect or rerun with --force: {path}"
         )
+    manifest = read_json(DATASET_MANIFEST_PATH)
+    expected_docs = {
+        task: int(
+            manifest.get("panels", {})
+            .get("tasks", {})
+            .get(task, {})
+            .get("evaluation_docs", -1)
+        )
+        for task in tasks
+    }
     for task in tasks:
-        if task in record["results"]:
+        existing = record["results"].get(task)
+        if existing is not None and extra_task_complete(existing, expected_docs[task]):
             continue
+        if existing is not None:
+            status(
+                "extra_task_incomplete_rerun",
+                model=model_key,
+                method=method,
+                task=task,
+            )
         result = simple_evaluate(
             model=lm_model,
             tasks=[task],

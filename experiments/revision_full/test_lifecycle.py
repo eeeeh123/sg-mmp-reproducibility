@@ -267,6 +267,44 @@ class LifecycleTests(unittest.TestCase):
             )
             self.assertTrue(lifecycle.causal_complete("qwen05", 41))
 
+    def test_logged_samples_allow_complete_multiple_filter_views(self):
+        samples = [
+            {"doc_id": doc_id, "filter": filter_name}
+            for filter_name in ["strict-match", "flexible-extract"]
+            for doc_id in range(3)
+        ]
+        item = {"n_samples": len(samples), "samples": samples}
+
+        self.assertTrue(lifecycle.logged_samples_complete(item, 3))
+        self.assertFalse(lifecycle.extra_task_complete(item, 3))
+        item["metrics"] = {"exact_match,flexible-extract": 1.0}
+        self.assertTrue(lifecycle.extra_task_complete(item, 3))
+
+    def test_logged_samples_reject_missing_or_duplicate_filter_rows(self):
+        missing = {
+            "n_samples": 5,
+            "samples": [
+                {"doc_id": doc_id, "filter": filter_name}
+                for filter_name, doc_ids in [
+                    ("strict-match", range(3)),
+                    ("flexible-extract", range(2)),
+                ]
+                for doc_id in doc_ids
+            ],
+        }
+        duplicate = {
+            "n_samples": 4,
+            "samples": [
+                {"doc_id": 0, "filter": "none"},
+                {"doc_id": 1, "filter": "none"},
+                {"doc_id": 2, "filter": "none"},
+                {"doc_id": 2, "filter": "none"},
+            ],
+        }
+
+        self.assertFalse(lifecycle.logged_samples_complete(missing, 3))
+        self.assertFalse(lifecycle.logged_samples_complete(duplicate, 3))
+
 
 class ServerPlanLifecycleTests(unittest.TestCase):
     def test_run_json_writes_use_atomic_replace(self):

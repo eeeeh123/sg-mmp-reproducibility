@@ -293,6 +293,58 @@ def task_point(
     return metric_percentage(record["results"][task]["metrics"], PANEL_METRICS[task])
 
 
+def module_placement_control_rows() -> list[dict]:
+    rows = []
+    control_variants = [
+        "qkv_only",
+        "o_only",
+        "ffn_only",
+        "qkv_priority_matched",
+        "o_priority_matched",
+        "ffn_priority_matched",
+        "hessian_diag_matched",
+    ]
+    for model_key, spec in MODEL_SPECS.items():
+        sg_method = method_id("sg_mmp", RANDOM_CALIB_SEED)
+        try:
+            sg = correctness(model_key, sg_method)
+        except FileNotFoundError:
+            continue
+        for variant in control_variants:
+            method = method_id(variant, RANDOM_CALIB_SEED)
+            metadata_path = (
+                STATE_METADATA_DIR
+                / model_key
+                / f"calib_{RANDOM_CALIB_SEED}"
+                / f"{variant}.json"
+            )
+            try:
+                control = correctness(model_key, method)
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                continue
+            rows.append(
+                {
+                    "model_key": model_key,
+                    "model": spec["display_name"],
+                    "variant": variant,
+                    "calibration_seed": RANDOM_CALIB_SEED,
+                    "parameter_weighted_average_bits": metadata[
+                        "parameter_weighted_average_bits"
+                    ],
+                    "allocation_details": metadata.get("allocation_details"),
+                    "control_vs_sg": paired(control, sg),
+                }
+            )
+    if rows:
+        corrected = holm_adjust(
+            [row["control_vs_sg"]["mcnemar_p_exact"] for row in rows]
+        )
+        for row, value in zip(rows, corrected):
+            row["control_vs_sg"]["mcnemar_p_holm_family"] = value
+    return rows
+
+
 def analyze() -> dict:
     from experiments.revision_full.run import dataset_provenance, model_provenance
 
@@ -528,30 +580,7 @@ def analyze() -> dict:
         for row, value in zip(complete_random_controls, corrected):
             row["empirical_one_sided_p_holm_family"] = value
 
-    module_controls = []
-    control_variants = [
-        "qkv_only",
-        "o_only",
-        "ffn_only",
-        "qkv_priority_matched",
-        "o_priority_matched",
-        "ffn_priority_matched",
-        "hessian_diag_matched",
-    ]
-    for model_key, spec in MODEL_SPECS.items():
-        sg_method = method_id("sg_mmp", RANDOM_CALIB_SEED)
-        try:
-            sg = correctness(model_key, sg_method)
-        except FileNotFoundError:
-            continue
-        for variant in control_variants:
-            method = method_id(variant, RANDOM_CALIB_SEED)
-            metadata_path = (
-                STATE_METADATA_DIR
-                / model_key
-                / f"calib_{RANDOM_CALIB_SEED}"
-                / f"{variant}.json"
-            )
+    module_controls = module_placement_control_rows()
 
     task_controls = []
     for model_key, spec in MODEL_SPECS.items():
@@ -629,31 +658,6 @@ def analyze() -> dict:
                     ),
                 }
             )
-            try:
-                control = correctness(model_key, method)
-                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            except FileNotFoundError:
-                continue
-            module_controls.append(
-                {
-                    "model_key": model_key,
-                    "model": spec["display_name"],
-                    "variant": variant,
-                    "calibration_seed": RANDOM_CALIB_SEED,
-                    "parameter_weighted_average_bits": metadata[
-                        "parameter_weighted_average_bits"
-                    ],
-                    "allocation_details": metadata.get("allocation_details"),
-                    "control_vs_sg": paired(control, sg),
-                }
-            )
-    if module_controls:
-        corrected = holm_adjust(
-            [row["control_vs_sg"]["mcnemar_p_exact"] for row in module_controls]
-        )
-        for row, value in zip(module_controls, corrected):
-            row["control_vs_sg"]["mcnemar_p_holm_family"] = value
-
     external_baselines = []
     registry = OUT / "external_baselines"
     external_metadata_paths = [
