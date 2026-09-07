@@ -1195,7 +1195,7 @@ def evaluate(model_key: str, calib_seed: int, force: bool = False) -> None:
         OFFICIAL_SOURCE_URL,
         manifest["official_source_commit"],
         Path(metadata["config"]),
-        calibration_seed,
+        calib_seed,
     )
 
 

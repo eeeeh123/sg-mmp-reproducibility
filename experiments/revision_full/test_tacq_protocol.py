@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from experiments.revision_full import analyze as revision_analysis
 from experiments.revision_full import make_tacq_plan
@@ -397,6 +397,78 @@ class TacqMathTests(unittest.TestCase):
                     tacq_protocol.require_contemporary_sg_control(
                         "qwen05", 41, manifest
                     )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_completed_tacq_evaluation_registers_requested_calibration_seed(self):
+        root = Path(__file__).resolve().parent / f".test_evaluate_{uuid.uuid4().hex}"
+        root.mkdir()
+        try:
+            state = root / "tacq.pt"
+            state.write_bytes(b"state")
+            smoke = root / "smoke.json"
+            smoke.write_text("{}", encoding="utf-8")
+            config = root / "config.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "validity_receipts": {
+                            "train_only_smoke_sha256": tacq_protocol.sha256(smoke)
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            metadata = root / "metadata.json"
+            metadata.write_text(
+                json.dumps(
+                    {
+                        "state_sha256": tacq_protocol.sha256(state),
+                        "mask_sha256": "mask",
+                        "source_precision_bank_sha256": "bank",
+                        "parameter_weighted_average_bits": 4.9,
+                        "config": str(config),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            samples = root / "samples.jsonl"
+            samples.write_text("{}\n", encoding="utf-8")
+            direct = MagicMock()
+            direct.ROW_METADATA = {}
+            direct.sample_path.return_value = samples
+            manifest = {
+                "manifest_sha256": "manifest",
+                "official_source_commit": "source-commit",
+            }
+
+            with patch.object(
+                tacq_protocol, "require_manifest", return_value=manifest
+            ), patch.object(
+                tacq_protocol, "state_metadata_path", return_value=metadata
+            ), patch.object(
+                tacq_protocol, "state_path", return_value=state
+            ), patch.object(
+                tacq_protocol, "_smoke_receipt_path", return_value=smoke
+            ), patch.object(
+                tacq_protocol, "_valid_smoke_receipt", return_value=True
+            ), patch.object(
+                tacq_protocol,
+                "require_contemporary_sg_control",
+                return_value={"source_precision_bank_sha256": "bank"},
+            ), patch.object(
+                tacq_protocol, "_bind_smoke_to_config"
+            ), patch.object(
+                tacq_protocol,
+                "_configure_eval",
+                return_value=(direct, "external_tacq__c41"),
+            ), patch(
+                "experiments.revision_full.external_baselines.register"
+            ) as register:
+                tacq_protocol.evaluate("qwen05", 41)
+
+            direct.evaluate.assert_called_once()
+            self.assertEqual(register.call_args.args[-1], 41)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
