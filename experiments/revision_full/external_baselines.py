@@ -153,8 +153,14 @@ def validate_external_config(
         freeze = config.get("adaptation_freeze", {})
         required_freeze = {
             "importance_train_samples",
+            "importance_sample_selection_seed",
+            "importance_target_doc_ids_exclude_fewshot_ids",
             "importance_batch_size",
             "gradient_accumulation",
+            "gradient_compute_dtype",
+            "gradient_accumulator_dtype",
+            "importance_loss",
+            "importance_max_length",
             "importance_normalization",
             "mask_granularity",
             "tie_breaking",
@@ -168,6 +174,44 @@ def validate_external_config(
             raise RuntimeError("TaCQ hyperparameters were not frozen before test")
         if int(config.get("calibration_seed", -1)) != int(calibration_seed or -1):
             raise RuntimeError("TaCQ calibration seed mismatch")
+        state_identity = config.get("state_identity", {})
+        required_identity = {
+            "state_sha256",
+            "mask_sha256",
+            "source_precision_bank_sha256",
+            "gradient_chunk_sha256",
+            "selected_fp16_parameters",
+            "eligible_parameters",
+        }
+        if required_identity - set(state_identity):
+            raise RuntimeError("TaCQ config lacks complete state/mask provenance")
+        if (
+            any(
+                re.fullmatch(r"[0-9a-f]{64}", str(state_identity.get(key, "")))
+                is None
+                for key in (
+                    "state_sha256",
+                    "mask_sha256",
+                    "source_precision_bank_sha256",
+                )
+            )
+            or not state_identity.get("gradient_chunk_sha256")
+            or any(
+                re.fullmatch(r"[0-9a-f]{64}", str(value)) is None
+                for value in state_identity.get("gradient_chunk_sha256", [])
+            )
+        ):
+            raise RuntimeError("TaCQ state/mask provenance hashes are invalid")
+        validity = config.get("validity_receipts", {})
+        if (
+            re.fullmatch(
+                r"[0-9a-f]{64}", str(validity.get("train_only_smoke_sha256", ""))
+            )
+            is None
+            or int(validity.get("generated", -1)) != 32
+            or validity.get("state_sha256") != state_identity["state_sha256"]
+        ):
+            raise RuntimeError("TaCQ config lacks a valid pre-test smoke binding")
     evaluator = config["canonical_evaluator"]
     if (
         evaluator.get("dataset") != "openai/gsm8k/main:test"
@@ -192,6 +236,14 @@ def validate_external_config(
             f"External bit accounting covers {total} parameters; the locked eligible "
             f"module scope contains {expected_parameter_count}"
         )
+    if method == "tacq":
+        identity = config["state_identity"]
+        if (
+            int(identity["eligible_parameters"]) != total
+            or int(identity["selected_fp16_parameters"]) != counts.get(16, 0)
+            or set(counts) != {4, 16}
+        ):
+            raise RuntimeError("TaCQ state identity disagrees with exact bit accounting")
     computed = sum(bits * count for bits, count in counts.items()) / total
     configured = float(config["parameter_weighted_average_bits"])
     if abs(computed - configured) > 1e-6 or abs(configured - average_bits) > 1e-6:
@@ -203,10 +255,12 @@ def validate_external_config(
 
 
 def validate_tacq_samples(
-    rows: list[dict], calibration_seed: int, manifest_sha256: str
+    rows: list[dict], calibration_seed: int, manifest_sha256: str, config: dict
 ) -> None:
     from experiments.fix_gsm8k_500.direct_eval import extract_prediction, is_correct
 
+    identity = config.get("state_identity", {})
+    validity = config.get("validity_receipts", {})
     invalid = [
         row.get("doc_id")
         for row in rows
@@ -216,6 +270,10 @@ def validate_tacq_samples(
         or row.get("tacq_manifest_sha256") != manifest_sha256
         or row.get("base_generation_kwargs_sha256")
         != BASE_GENERATION_KWARGS_SHA256
+        or row.get("tacq_state_sha256") != identity.get("state_sha256")
+        or row.get("tacq_mask_sha256") != identity.get("mask_sha256")
+        or row.get("tacq_smoke_receipt_sha256")
+        != validity.get("train_only_smoke_sha256")
         or row.get("stop_reason")
         not in {"generated_question_marker", "model_eos", "max_new_tokens"}
         or not isinstance(row.get("raw_generation"), str)
@@ -288,6 +346,7 @@ def register(
             sample_rows,
             int(calibration_seed),
             str(validated_config["environment_lock"]["manifest_sha256"]),
+            validated_config,
         )
 
     method_id = (
@@ -372,6 +431,7 @@ def validate() -> None:
                 sample_rows,
                 int(record["calibration_seed"]),
                 str(validated_config["environment_lock"]["manifest_sha256"]),
+                validated_config,
             )
         records.append(record)
     print(json.dumps({"registered": len(records), "records": records}, ensure_ascii=False, indent=2))

@@ -48,6 +48,7 @@ from experiments.revision_full.external_baselines import (
     sha256,
     validate_external_config,
     validate_source,
+    validate_tacq_samples,
 )
 from experiments.revision_full.lifecycle import (
     bank_consumer_variants,
@@ -631,24 +632,9 @@ def core_errors() -> list[str]:
 def shadow_errors() -> list[str]:
     errors = core_errors()
     try:
-        from experiments.revision_full.shadow_gate import (
-            RECEIPT_PATH,
-            require_manifest,
-        )
+        from experiments.revision_full.tacq import require_shadow_pass
 
-        manifest = require_manifest()
-        receipt = json.loads(RECEIPT_PATH.read_text(encoding="utf-8"))
-        if (
-            receipt.get("pass") is not True
-            or receipt.get("errors")
-            or receipt.get("manifest_sha256") != manifest["manifest_sha256"]
-            or int(receipt.get("checks", {}).get("rows", -1)) != 200
-            or int(receipt.get("checks", {}).get("canonical_prefix_matches", -1))
-            != 200
-            or int(receipt.get("checks", {}).get("prediction_matches", -1)) != 200
-            or int(receipt.get("checks", {}).get("correctness_matches", -1)) != 200
-        ):
-            errors.append("question-stop shadow receipt is not an exact 200/200 PASS")
+        require_shadow_pass()
     except (KeyError, OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         errors.append(f"invalid or missing question-stop shadow gate: {exc}")
     return errors
@@ -656,6 +642,10 @@ def shadow_errors() -> list[str]:
 
 def tacq_errors() -> list[str]:
     errors = shadow_errors()
+    registration_evidence: dict[str, dict[int, dict]] = {
+        "qwen05": {},
+        "qwen15": {},
+    }
     try:
         from experiments.revision_full.tacq import require_manifest
 
@@ -679,7 +669,7 @@ def tacq_errors() -> list[str]:
                 record = json.loads(path.read_text(encoding="utf-8"))
                 sample_file = resolve_record_path(record["samples"])
                 config_file = resolve_record_path(record["config"])
-                read_samples(sample_file)
+                sample_rows = read_samples(sample_file)
                 if sha256(sample_file) != record["samples_sha256"]:
                     raise RuntimeError("sample hash mismatch")
                 if sha256(config_file) != record["config_sha256"]:
@@ -700,7 +690,7 @@ def tacq_errors() -> list[str]:
                         encoding="utf-8"
                     )
                 )
-                validate_external_config(
+                validated_config = validate_external_config(
                     config_file,
                     method="tacq",
                     model_revision=current_model_snapshot(model_key)["resolved_revision"],
@@ -716,11 +706,23 @@ def tacq_errors() -> list[str]:
                     "environment_lock", {}
                 ).get("manifest_sha256") != manifest["manifest_sha256"]:
                     raise RuntimeError("config is not bound to the frozen TaCQ manifest")
+                validate_tacq_samples(
+                    sample_rows,
+                    calib_seed,
+                    str(config_payload["environment_lock"]["manifest_sha256"]),
+                    validated_config,
+                )
                 gap = float(record["sg_parameter_weighted_average_bits"]) - float(
                     record["parameter_weighted_average_bits"]
                 )
                 if not 0 <= gap <= 0.01:
                     raise RuntimeError(f"non-matched/non-conservative bit gap {gap}")
+                registration_evidence[model_key][calib_seed] = {
+                    "calibration_seed": calib_seed,
+                    "samples_sha256": record["samples_sha256"],
+                    "config_sha256": record["config_sha256"],
+                    "source_commit": record["source_commit"],
+                }
             except (KeyError, OSError, RuntimeError, ValueError) as exc:
                 errors.append(f"invalid TaCQ registration {model_key}/c{calib_seed}: {exc}")
     analysis_path = OUT / "analysis_full.json"
@@ -735,6 +737,30 @@ def tacq_errors() -> list[str]:
             len(primary) != 2
             or {row.get("model_key") for row in primary} != {"qwen05", "qwen15"}
             or any(len(row.get("seed_diagnostics", [])) != 3 for row in primary)
+            or any(
+                {int(item.get("calibration_seed", -1)) for item in row.get("seed_diagnostics", [])}
+                != set(CALIB_SEEDS)
+                for row in primary
+            )
+            or any(
+                row.get("registration_evidence")
+                != [
+                    registration_evidence[row["model_key"]].get(seed)
+                    for seed in CALIB_SEEDS
+                ]
+                for row in primary
+            )
+            or any(
+                int(row.get("model_level_sg_minus_tacq", {}).get("n_seeds", -1))
+                != len(CALIB_SEEDS)
+                or int(
+                    row.get("model_level_sg_minus_tacq", {}).get(
+                        "n_examples_per_seed", -1
+                    )
+                )
+                != GSM8K_TEST_SIZE
+                for row in primary
+            )
             or any(
                 "paired_item_cluster_sign_flip_p_holm_two_models"
                 not in row.get("model_level_sg_minus_tacq", {})

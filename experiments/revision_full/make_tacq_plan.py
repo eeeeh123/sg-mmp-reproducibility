@@ -23,6 +23,7 @@ def shadow_commands(gpu: int = 0) -> list[str]:
     shadow = "python experiments/revision_full/shadow_gate.py"
     result = [
         "python -m unittest discover -s experiments/revision_full -p 'test_*.py'",
+        "python experiments/revision_full/server_preflight.py --expected-gpus 2 --concurrent-models 1",
         f"{shadow} prepare",
     ]
     for model in TACQ_MODELS:
@@ -50,6 +51,7 @@ def tacq_commands(gpu: int = 0) -> list[str]:
     result = [
         # This check is intentionally repeated at the TaCQ boundary.  The
         # TaCQ phase cannot start from a copied/stale or failed Shadow receipt.
+        "python experiments/revision_full/server_preflight.py --expected-gpus 2 --concurrent-models 1",
         "python experiments/revision_full/readiness.py --stage shadow",
         f"{tacq} freeze --source-commit {OFFICIAL_SOURCE_COMMIT}",
     ]

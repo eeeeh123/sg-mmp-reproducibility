@@ -56,6 +56,10 @@ IMPORTANCE_SELECTION_SEED = 20260906
 IMPORTANCE_BATCH_SIZE = 1
 GRADIENT_ACCUMULATION = "sum of per-example absolute gradients"
 IMPORTANCE_NORMALIZATION = "none"
+IMPORTANCE_LOSS = "full causal next-token cross entropy over five-shot prompt plus worked answer"
+IMPORTANCE_MAX_LENGTH = 2048
+GRADIENT_COMPUTE_DTYPE = "float16 model parameters under the locked loader"
+GRADIENT_ACCUMULATOR_DTYPE = "float32"
 IMPORTANCE_CHECKPOINT_EXAMPLES = 32
 MASK_GRANULARITY = "global eligible-weight element"
 TIE_BREAKING = "score descending, then module name ascending and row-major index ascending"
@@ -103,11 +107,38 @@ def save_torch_atomic(value, path: Path) -> None:
 
 
 def require_shadow_pass() -> dict:
+    from experiments.revision_full import shadow_gate
+
+    shadow_manifest = shadow_gate.require_manifest()
     if not SHADOW_RECEIPT.exists():
         raise RuntimeError("Shadow question-stop gate has not passed")
     receipt = json.loads(SHADOW_RECEIPT.read_text(encoding="utf-8"))
-    if receipt.get("pass") is not True or receipt.get("errors"):
-        raise RuntimeError("Shadow question-stop receipt is not a PASS")
+    expected = int(shadow_manifest["total_formal_generations"])
+    checks = receipt.get("checks", {})
+    if (
+        receipt.get("pass") is not True
+        or receipt.get("errors")
+        or receipt.get("manifest_sha256") != shadow_manifest["manifest_sha256"]
+        or int(checks.get("rows", -1)) != expected
+        or int(checks.get("canonical_prefix_matches", -1)) != expected
+        or int(checks.get("prediction_matches", -1)) != expected
+        or int(checks.get("correctness_matches", -1)) != expected
+    ):
+        raise RuntimeError("Shadow question-stop receipt is not an exact PASS")
+    expected_cells = {
+        f"{model}/{variant}"
+        for model in shadow_gate.SHADOW_MODELS
+        for variant in shadow_gate.SHADOW_VARIANTS
+    }
+    recorded_hashes = receipt.get("row_file_sha256", {})
+    if set(recorded_hashes) != expected_cells:
+        raise RuntimeError("Shadow PASS receipt does not bind all four row files")
+    for model in shadow_gate.SHADOW_MODELS:
+        for variant in shadow_gate.SHADOW_VARIANTS:
+            key = f"{model}/{variant}"
+            path = shadow_gate.output_path(model, variant)
+            if not path.exists() or sha256(path) != recorded_hashes[key]:
+                raise RuntimeError(f"Shadow row evidence changed after PASS: {key}")
     return receipt
 
 
@@ -115,14 +146,47 @@ def _existing_test_outputs() -> list[Path]:
     return sorted((RESULTS_DIR / "samples").glob("*__external_tacq__c*__gsm8k1319.jsonl"))
 
 
+def _existing_registrations() -> list[Path]:
+    return sorted((OUT / "external_baselines").glob("*__tacq__c*.json"))
+
+
+def _test_output_path(model_key: str, calib_seed: int) -> Path:
+    return (
+        RESULTS_DIR
+        / "samples"
+        / f"{model_key}__external_tacq__c{calib_seed}__gsm8k{GSM8K_TEST_SIZE}.jsonl"
+    )
+
+
+def _tracked_worktree_is_clean() -> bool:
+    result = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return not result.stdout.strip()
+
+
 def freeze_manifest(source_commit: str, force: bool = False) -> dict:
     if len(source_commit) != 40 or any(c not in "0123456789abcdefABCDEF" for c in source_commit):
         raise ValueError("TaCQ source commit must be a full 40-character SHA")
+    if source_commit.lower() != OFFICIAL_SOURCE_COMMIT:
+        raise ValueError(
+            "TaCQ source commit differs from the locally verified pinned commit"
+        )
     shadow = require_shadow_pass()
-    if (MANIFEST_PATH.exists() and not force) or (force and _existing_test_outputs()):
+    if (MANIFEST_PATH.exists() and not force) or (
+        force and (_existing_test_outputs() or _existing_registrations())
+    ):
         if MANIFEST_PATH.exists() and not force:
             return require_manifest()
         raise RuntimeError("Refusing to replace the TaCQ manifest after test output exists")
+    if not _tracked_worktree_is_clean():
+        raise RuntimeError(
+            "Refusing to freeze TaCQ with tracked working-tree changes; "
+            "the implementation must be retrievable from its Git commit"
+        )
 
     from experiments.revision_full.run import (
         dataset_provenance,
@@ -160,6 +224,7 @@ def freeze_manifest(source_commit: str, force: bool = False) -> dict:
         Path(__file__).with_name("external_baselines.py"),
         Path(__file__).with_name("protocol.py"),
         Path(__file__).with_name("question_stop.py"),
+        Path(__file__).with_name("readiness.py"),
         Path(__file__).with_name("run.py"),
         Path(__file__).with_name("shadow_gate.py"),
         repository_root / "experiments" / "fix_gsm8k_500" / "direct_eval.py",
@@ -195,10 +260,12 @@ def freeze_manifest(source_commit: str, force: bool = False) -> dict:
             "sample_records": training_identity,
             "batch_size": IMPORTANCE_BATCH_SIZE,
             "gradient_accumulation": GRADIENT_ACCUMULATION,
-            "loss": "full causal next-token cross entropy over five-shot prompt plus worked answer",
-            "max_length": 2048,
+            "loss": IMPORTANCE_LOSS,
+            "max_length": IMPORTANCE_MAX_LENGTH,
+            "target_doc_ids_exclude_fewshot_ids": [0, 1, 2, 3, 4],
             "shuffle": False,
-            "accumulator_dtype": "float32",
+            "accumulator_dtype": GRADIENT_ACCUMULATOR_DTYPE,
+            "gradient_compute_dtype": GRADIENT_COMPUTE_DTYPE,
             "normalization": IMPORTANCE_NORMALIZATION,
             "formula": "abs(sum(abs(per_example_gradient)) * (W_clean - W4_dequantized) * W_clean)",
             "checkpoint_examples": IMPORTANCE_CHECKPOINT_EXAMPLES,
@@ -218,8 +285,14 @@ def freeze_manifest(source_commit: str, force: bool = False) -> dict:
         },
         "fixed_hyperparameters": {
             "importance_train_samples": IMPORTANCE_N,
+            "importance_sample_selection_seed": IMPORTANCE_SELECTION_SEED,
+            "importance_target_doc_ids_exclude_fewshot_ids": [0, 1, 2, 3, 4],
             "importance_batch_size": IMPORTANCE_BATCH_SIZE,
             "gradient_accumulation": GRADIENT_ACCUMULATION,
+            "gradient_compute_dtype": GRADIENT_COMPUTE_DTYPE,
+            "gradient_accumulator_dtype": GRADIENT_ACCUMULATOR_DTYPE,
+            "importance_loss": IMPORTANCE_LOSS,
+            "importance_max_length": IMPORTANCE_MAX_LENGTH,
             "importance_normalization": IMPORTANCE_NORMALIZATION,
             "mask_granularity": MASK_GRANULARITY,
             "tie_breaking": TIE_BREAKING,
@@ -345,6 +418,9 @@ def capture_importance(model_key: str) -> None:
         parameter.requires_grad_(True)
     model.eval()
     prefix = direct.build_fewshot(train, k=5)
+    model_test_started = any(
+        _test_output_path(model_key, seed).exists() for seed in CALIB_SEEDS
+    )
 
     for start in range(0, len(ids), IMPORTANCE_CHECKPOINT_EXAMPLES):
         chunk_ids = ids[start : start + IMPORTANCE_CHECKPOINT_EXAMPLES]
@@ -353,6 +429,11 @@ def capture_importance(model_key: str) -> None:
         if _valid_chunk(path, manifest, model_key, chunk_ids):
             print(f"[skip] valid TaCQ gradient chunk {model_key} {start}:{stop}")
             continue
+        if model_test_started:
+            raise RuntimeError(
+                "TaCQ test output already exists; refusing to rebuild a missing or "
+                f"changed importance chunk: {path}"
+            )
         accumulator = {
             name: torch.zeros_like(parameter, dtype=torch.float32, device=parameter.device)
             for name, parameter in eligible.items()
@@ -370,7 +451,7 @@ def capture_importance(model_key: str) -> None:
                 full_text,
                 return_tensors="pt",
                 truncation=True,
-                max_length=2048,
+                max_length=IMPORTANCE_MAX_LENGTH,
             ).to(model.device)
             model.zero_grad(set_to_none=True)
             output = model(
@@ -552,13 +633,14 @@ def build_state(model_key: str, calib_seed: int, force: bool = False) -> Path:
 
     output = state_path(model_key, calib_seed, "tacq")
     metadata_path = state_metadata_path(model_key, calib_seed, "tacq")
-    test_output = (
-        RESULTS_DIR
-        / "samples"
-        / f"{model_key}__external_tacq__c{calib_seed}__gsm8k{GSM8K_TEST_SIZE}.jsonl"
-    )
+    test_output = _test_output_path(model_key, calib_seed)
     if force and test_output.exists():
         raise RuntimeError("Refusing --force after the corresponding TaCQ test output exists")
+    if test_output.exists() and not output.exists():
+        raise RuntimeError(
+            "TaCQ test output exists but its exact state is missing; refusing to "
+            "rebuild a state that could mix different masks within one test run"
+        )
     if output.exists() and not force:
         existing = require_current_state_metadata(
             metadata_path, output, model_key, calib_seed, "tacq"
@@ -745,6 +827,14 @@ def build_state(model_key: str, calib_seed: int, force: bool = False) -> Path:
         },
         "command": f"python experiments/revision_full/tacq.py build --model {model_key} --calib-seed {calib_seed}",
         "environment_lock": {"repository_server_env": "server_env.sh", "manifest_sha256": manifest["manifest_sha256"]},
+        "state_identity": {
+            "state_sha256": state_sha,
+            "mask_sha256": mask_digest.hexdigest(),
+            "source_precision_bank_sha256": bank_sha256,
+            "gradient_chunk_sha256": gradient_chunk_sha256,
+            "selected_fp16_parameters": k,
+            "eligible_parameters": total,
+        },
         "adaptations_from_official_source": [
             "Qwen2.5-0.5B/1.5B causal-LM loader",
             "shared locked GPTQ-W4 group-128 backend for controlled allocation comparison",
@@ -851,6 +941,46 @@ def _configure_eval(model_key: str, calib_seed: int):
     return direct, method
 
 
+def _smoke_receipt_path(model_key: str, calib_seed: int) -> Path:
+    return TACQ_DIR / "smoke" / f"{model_key}__c{calib_seed}.json"
+
+
+def _valid_smoke_receipt(receipt: dict, manifest: dict, metadata: dict) -> bool:
+    return (
+        receipt.get("schema") == "tacq-train-smoke-v1"
+        and receipt.get("pass") is True
+        and receipt.get("train_only") is True
+        and receipt.get("save_reload_validated") is True
+        and receipt.get("manifest_sha256") == manifest["manifest_sha256"]
+        and receipt.get("model_key") == metadata.get("model_key")
+        and int(receipt.get("calibration_seed", -1))
+        == int(metadata.get("calibration_seed", -2))
+        and int(receipt.get("generated", -1)) == 32
+        and receipt.get("state_sha256") == metadata.get("state_sha256")
+    )
+
+
+def _bind_smoke_to_config(metadata: dict, smoke_path: Path) -> None:
+    config_path = Path(metadata["config"])
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    expected = {
+        "train_only_smoke_sha256": sha256(smoke_path),
+        "generated": 32,
+        "state_sha256": metadata["state_sha256"],
+    }
+    existing = config.get("validity_receipts")
+    if existing is not None and existing != expected:
+        raise RuntimeError("TaCQ config contains a stale smoke receipt binding")
+    if existing is None:
+        if _test_output_path(
+            str(metadata["model_key"]), int(metadata["calibration_seed"])
+        ).exists():
+            raise RuntimeError(
+                "Refusing to add a missing smoke/config binding after test access"
+            )
+        write_json(config_path, {**config, "validity_receipts": expected})
+
+
 def smoke(model_key: str, calib_seed: int) -> None:
     import torch
 
@@ -858,8 +988,18 @@ def smoke(model_key: str, calib_seed: int) -> None:
     metadata_path = state_metadata_path(model_key, calib_seed, "tacq")
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     state = state_path(model_key, calib_seed, "tacq")
-    if metadata.get("state_sha256") != sha256(state):
+    if not state.exists() or metadata.get("state_sha256") != sha256(state):
         raise RuntimeError("TaCQ state changed before smoke test")
+    path = _smoke_receipt_path(model_key, calib_seed)
+    if path.exists():
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+        if not _valid_smoke_receipt(receipt, manifest, metadata):
+            raise RuntimeError("Existing TaCQ smoke receipt is stale or invalid")
+        _bind_smoke_to_config(metadata, path)
+        print(f"[skip] valid TaCQ smoke receipt {model_key}/c{calib_seed}")
+        return
+    if _test_output_path(model_key, calib_seed).exists():
+        raise RuntimeError("Refusing to recreate a missing smoke gate after test access")
     direct, method = _configure_eval(model_key, calib_seed)
     model, tokenizer = direct.load_model(model_key, method)
     train, _ = direct.get_dataset()
@@ -907,8 +1047,8 @@ def smoke(model_key: str, calib_seed: int) -> None:
         "state_sha256": metadata["state_sha256"],
         "save_reload_validated": True,
     }
-    path = TACQ_DIR / "smoke" / f"{model_key}__c{calib_seed}.json"
     write_json(path, receipt)
+    _bind_smoke_to_config(metadata, path)
     del model, tokenizer
     print(json.dumps(receipt, ensure_ascii=False, indent=2))
     if not receipt["pass"]:
@@ -920,16 +1060,27 @@ def evaluate(model_key: str, calib_seed: int, force: bool = False) -> None:
     metadata = json.loads(
         state_metadata_path(model_key, calib_seed, "tacq").read_text(encoding="utf-8")
     )
-    smoke_path = TACQ_DIR / "smoke" / f"{model_key}__c{calib_seed}.json"
+    state = state_path(model_key, calib_seed, "tacq")
+    if not state.exists() or metadata.get("state_sha256") != sha256(state):
+        raise RuntimeError("TaCQ state changed after its train-only smoke gate")
+    smoke_path = _smoke_receipt_path(model_key, calib_seed)
     smoke_receipt = json.loads(smoke_path.read_text(encoding="utf-8"))
-    if (
-        smoke_receipt.get("pass") is not True
-        or smoke_receipt.get("train_only") is not True
-        or smoke_receipt.get("manifest_sha256") != manifest["manifest_sha256"]
-        or smoke_receipt.get("state_sha256") != metadata.get("state_sha256")
-    ):
+    if not _valid_smoke_receipt(smoke_receipt, manifest, metadata):
         raise RuntimeError("TaCQ train-only smoke gate is missing or stale")
+    _bind_smoke_to_config(metadata, smoke_path)
+    config = json.loads(Path(metadata["config"]).read_text(encoding="utf-8"))
+    if config.get("validity_receipts", {}).get(
+        "train_only_smoke_sha256"
+    ) != sha256(smoke_path):
+        raise RuntimeError("TaCQ config is not bound to the smoke receipt")
     direct, method = _configure_eval(model_key, calib_seed)
+    direct.ROW_METADATA.update(
+        {
+            "tacq_state_sha256": metadata["state_sha256"],
+            "tacq_mask_sha256": metadata["mask_sha256"],
+            "tacq_smoke_receipt_sha256": sha256(smoke_path),
+        }
+    )
     direct.evaluate(
         model_key,
         method,

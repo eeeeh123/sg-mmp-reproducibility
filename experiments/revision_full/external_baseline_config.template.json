@@ -23,14 +23,33 @@
   ],
   "adaptation_freeze": {
     "importance_train_samples": 128,
+    "importance_sample_selection_seed": 20260906,
+    "importance_target_doc_ids_exclude_fewshot_ids": [0, 1, 2, 3, 4],
     "importance_batch_size": 1,
     "gradient_accumulation": "sum of per-example absolute gradients",
+    "gradient_compute_dtype": "float16 model parameters under the locked loader",
+    "gradient_accumulator_dtype": "float32",
+    "importance_loss": "full causal next-token cross entropy over five-shot prompt plus worked answer",
+    "importance_max_length": 2048,
     "importance_normalization": "none",
     "mask_granularity": "global eligible-weight element",
     "tie_breaking": "score descending, then deterministic global index",
     "budget_rounding": "floor; never exceed SG logical budget",
     "importance_recomputed_per_calibration_seed": false,
     "hyperparameters_frozen_before_test": true
+  },
+  "state_identity": {
+    "state_sha256": "SHA256_OF_SERIALIZED_STATE",
+    "mask_sha256": "SHA256_OF_DETERMINISTIC_BITPACKED_MASKS",
+    "source_precision_bank_sha256": "SHA256_OF_SOURCE_PRECISION_BANK",
+    "gradient_chunk_sha256": ["SHA256_PER_GRADIENT_CHUNK"],
+    "selected_fp16_parameters": 0,
+    "eligible_parameters": 0
+  },
+  "validity_receipts": {
+    "train_only_smoke_sha256": "SHA256_OF_32_GENERATION_SMOKE_RECEIPT",
+    "generated": 32,
+    "state_sha256": "MUST_EQUAL_STATE_IDENTITY_STATE_SHA256"
   },
   "budget_search": {
     "candidate_settings_tried": [],

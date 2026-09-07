@@ -71,10 +71,37 @@ def read_jsonl(path: Path) -> list[dict]:
 
 
 def append_jsonl(path: Path, rows: list[dict]) -> None:
+    """Append one completed batch without exposing a torn trailing row."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as stream:
-        for row in rows:
-            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    payload = existing + "".join(
+        json.dumps(row, ensure_ascii=False) + "\n" for row in rows
+    )
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(payload, encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _tracked_worktree_is_clean() -> bool:
+    result = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return not result.stdout.strip()
+
+
+def _tacq_has_started() -> bool:
+    return (
+        (OUT / "tacq" / "frozen_manifest.json").exists()
+        or any((RESULTS_DIR / "samples").glob("*__external_tacq__c*__gsm8k1319.jsonl"))
+        or any((OUT / "external_baselines").glob("*__tacq__c*.json"))
+    )
 
 
 def source_path(model_key: str, variant: str) -> Path:
@@ -138,10 +165,17 @@ def _coverage_select(w4: dict[int, dict], sg: dict[int, dict]) -> list[int]:
 
 def prepare(force: bool = False) -> dict:
     if MANIFEST_PATH.exists() and not force:
+        manifest = require_manifest()
+        print("[skip] existing valid Shadow manifest")
+        print(json.dumps(manifest, ensure_ascii=False, indent=2))
+        return manifest
+    if not _tracked_worktree_is_clean():
         raise RuntimeError(
-            f"Shadow manifest already exists: {MANIFEST_PATH}; use --force only "
-            "before any shadow or TaCQ test output exists"
+            "Refusing to freeze Shadow with tracked working-tree changes; "
+            "the implementation must be retrievable from its Git commit"
         )
+    if force and _tacq_has_started():
+        raise RuntimeError("Refusing to change Shadow after the TaCQ phase started")
     if force and any((SHADOW_DIR / "rows").glob("*.jsonl")):
         raise RuntimeError("Refusing to change a manifest after shadow rows exist")
 
@@ -174,10 +208,24 @@ def prepare(force: bool = False) -> dict:
             text=True,
         ).stdout.strip(),
         "implementation_files_sha256": {
-            "experiments/revision_full/shadow_gate.py": sha256(Path(__file__)),
-            "experiments/revision_full/question_stop.py": sha256(
-                Path(__file__).with_name("question_stop.py")
-            ),
+            str(path.relative_to(Path(__file__).resolve().parents[2])): sha256(path)
+            for path in (
+                Path(__file__),
+                Path(__file__).with_name("protocol.py"),
+                Path(__file__).with_name("question_stop.py"),
+                Path(__file__).with_name("run.py"),
+                Path(__file__).resolve().parents[1]
+                / "fix_gsm8k_500"
+                / "direct_eval.py",
+                Path(__file__).resolve().parents[2]
+                / "ptq"
+                / "quant"
+                / "gptq.py",
+                Path(__file__).resolve().parents[2]
+                / "ptq"
+                / "quant"
+                / "mixed_precision.py",
+            )
         },
         "purpose": "implementation equivalence only; not an accuracy estimate",
         "models": list(SHADOW_MODELS),
@@ -249,6 +297,9 @@ def run_cell(model_key: str, variant: str, force: bool = False) -> None:
     manifest = require_manifest()
     path = output_path(model_key, variant)
     if force:
+        if _tacq_has_started():
+            raise RuntimeError("Refusing to rerun Shadow after the TaCQ phase started")
+        RECEIPT_PATH.unlink(missing_ok=True)
         path.unlink(missing_ok=True)
     existing = read_jsonl(path) if path.exists() else []
     by_id = {int(row["doc_id"]): row for row in existing}
@@ -265,6 +316,9 @@ def run_cell(model_key: str, variant: str, force: bool = False) -> None:
     if not pending:
         print(f"[skip] shadow {model_key}/{variant} complete")
         return
+    # Any mutation invalidates the aggregate receipt until verify() recomputes
+    # all four cells and atomically writes a new PASS.
+    RECEIPT_PATH.unlink(missing_ok=True)
 
     from experiments.revision_full.run import configure_direct_eval
 
@@ -340,7 +394,14 @@ def run_cell(model_key: str, variant: str, force: bool = False) -> None:
 
 def verify() -> dict:
     manifest = require_manifest()
-    from experiments.fix_gsm8k_500.direct_eval import extract_prediction, is_correct
+    from experiments.fix_gsm8k_500.direct_eval import (
+        extract_prediction,
+        gold_answer,
+        is_correct,
+    )
+    from experiments.revision_full.run import get_dataset
+
+    _, test = get_dataset()
 
     rows = []
     errors = []
@@ -357,6 +418,19 @@ def verify() -> dict:
                 doc_id = int(row["doc_id"])
                 old = source[doc_id]
                 old_prefix = canonical_answer_prefix(old["generation"]).text
+                source_prediction = extract_prediction(old["generation"])
+                source_gold = gold_answer(test[doc_id]["answer"])
+                if (
+                    source_prediction != old.get("prediction")
+                    or is_correct(source_prediction, source_gold)
+                    != int(old.get("correct", -1))
+                    or old.get("question") != test[doc_id]["question"]
+                    or old.get("gold") != source_gold
+                ):
+                    errors.append(
+                        f"shadow source row is internally inconsistent "
+                        f"{model_key}/{variant}/{doc_id}"
+                    )
                 new_prefix = row.get("new_canonical_generation")
                 new_prediction = extract_prediction(str(new_prefix))
                 recomputed = {

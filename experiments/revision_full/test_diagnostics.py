@@ -145,11 +145,24 @@ class DiagnosticTests(unittest.TestCase):
                         "calibration_and_selection_data": {"split": "train"},
                         "command": "python official.py",
                         "environment_lock": {"python": "3.12"},
+                        "state_identity": {
+                            "state_sha256": "c" * 64,
+                            "mask_sha256": "d" * 64,
+                            "source_precision_bank_sha256": "e" * 64,
+                            "gradient_chunk_sha256": ["f" * 64],
+                            "selected_fp16_parameters": 10,
+                            "eligible_parameters": 100,
+                        },
+                        "validity_receipts": {
+                            "train_only_smoke_sha256": "1" * 64,
+                            "generated": 32,
+                            "state_sha256": "c" * 64,
+                        },
                         "adaptations_from_official_source": [],
                         "budget_search": {"uses_test_accuracy": False},
-                        "bit_width_parameter_counts": {"4": 75, "8": 25},
+                        "bit_width_parameter_counts": {"4": 90, "16": 10},
                         "bit_accounting_scope": "locked eligible projections",
-                        "parameter_weighted_average_bits": 5.0,
+                        "parameter_weighted_average_bits": 5.2,
                         "canonical_evaluator": {
                             "dataset": "openai/gsm8k/main:test",
                             "n": 1319,
@@ -160,8 +173,14 @@ class DiagnosticTests(unittest.TestCase):
                         "calibration_seed": 41,
                         "adaptation_freeze": {
                             "importance_train_samples": 128,
+                            "importance_sample_selection_seed": 20260906,
+                            "importance_target_doc_ids_exclude_fewshot_ids": [0, 1, 2, 3, 4],
                             "importance_batch_size": 1,
                             "gradient_accumulation": "sum abs",
+                            "gradient_compute_dtype": "float16",
+                            "gradient_accumulator_dtype": "float32",
+                            "importance_loss": "full causal loss",
+                            "importance_max_length": 2048,
                             "importance_normalization": "none",
                             "mask_granularity": "element",
                             "tie_breaking": "index",
@@ -178,11 +197,11 @@ class DiagnosticTests(unittest.TestCase):
                 method="tacq",
                 model_revision="b" * 40,
                 source_commit="a" * 40,
-                average_bits=5.0,
+                average_bits=5.2,
                 expected_parameter_count=100,
                 calibration_seed=41,
             )
-            self.assertEqual(config["parameter_weighted_average_bits"], 5.0)
+            self.assertEqual(config["parameter_weighted_average_bits"], 5.2)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

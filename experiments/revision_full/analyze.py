@@ -734,6 +734,15 @@ def analyze() -> dict:
                         seeded[seed]["sg_parameter_weighted_average_bits"]
                         for seed in CALIB_SEEDS
                     ],
+                    "registration_evidence": [
+                        {
+                            "calibration_seed": seed,
+                            "samples_sha256": seeded[seed]["samples_sha256"],
+                            "config_sha256": seeded[seed]["config_sha256"],
+                            "source_commit": seeded[seed]["source_commit"],
+                        }
+                        for seed in CALIB_SEEDS
+                    ],
                     "seed_diagnostics": diagnostics,
                     "model_level_sg_minus_tacq": primary,
                     "primary_hypothesis": True,

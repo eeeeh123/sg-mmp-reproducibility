@@ -1,7 +1,8 @@
 """CPU-only tests for the Shadow/TaCQ gates and deterministic accounting."""
 
-import shutil
+import json
 import math
+import shutil
 import unittest
 import uuid
 from pathlib import Path
@@ -13,6 +14,9 @@ from unittest.mock import patch
 
 from experiments.revision_full import analyze as revision_analysis
 from experiments.revision_full import make_tacq_plan
+from experiments.revision_full import readiness as revision_readiness
+from experiments.revision_full import shadow_gate
+from experiments.revision_full import tacq as tacq_protocol
 from experiments.revision_full.question_stop import (
     BASE_GENERATION_KWARGS_SHA256,
     GeneratedQuestionStopLogitsProcessor,
@@ -77,6 +81,16 @@ class QuestionStopTests(unittest.TestCase):
 
 
 class TacqMathTests(unittest.TestCase):
+    @staticmethod
+    def _sample_config():
+        return {
+            "state_identity": {
+                "state_sha256": "state",
+                "mask_sha256": "mask",
+            },
+            "validity_receipts": {"train_only_smoke_sha256": "smoke"},
+        }
+
     def test_tacq_sample_contract_rejects_unstopped_or_cross_seed_rows(self):
         row = {
             "doc_id": 0,
@@ -85,6 +99,9 @@ class TacqMathTests(unittest.TestCase):
             "calibration_seed": 41,
             "tacq_manifest_sha256": "manifest",
             "base_generation_kwargs_sha256": BASE_GENERATION_KWARGS_SHA256,
+            "tacq_state_sha256": "state",
+            "tacq_mask_sha256": "mask",
+            "tacq_smoke_receipt_sha256": "smoke",
             "stop_reason": "model_eos",
             "raw_generation": "work\n#### 4",
             "generation": "work\n#### 4",
@@ -95,9 +112,12 @@ class TacqMathTests(unittest.TestCase):
             "generated_question_marker_found": False,
             "ended_with_eos": True,
         }
-        validate_tacq_samples([row], 41, "manifest")
+        config = self._sample_config()
+        validate_tacq_samples([row], 41, "manifest", config)
         with self.assertRaisesRegex(RuntimeError, "stopped evaluator contract"):
-            validate_tacq_samples([{**row, "calibration_seed": 97}], 41, "manifest")
+            validate_tacq_samples(
+                [{**row, "calibration_seed": 97}], 41, "manifest", config
+            )
 
     def test_tacq_sample_contract_recomputes_canonical_prediction_and_correctness(self):
         row = {
@@ -107,6 +127,9 @@ class TacqMathTests(unittest.TestCase):
             "calibration_seed": 41,
             "tacq_manifest_sha256": "manifest",
             "base_generation_kwargs_sha256": BASE_GENERATION_KWARGS_SHA256,
+            "tacq_state_sha256": "state",
+            "tacq_mask_sha256": "mask",
+            "tacq_smoke_receipt_sha256": "smoke",
             "stop_reason": "generated_question_marker",
             "raw_generation": "work\n#### 4\n\nQuestion: invented",
             "generation": "work\n#### 4",
@@ -117,9 +140,97 @@ class TacqMathTests(unittest.TestCase):
             "generated_question_marker_found": True,
             "ended_with_eos": True,
         }
-        validate_tacq_samples([row], 41, "manifest")
+        config = self._sample_config()
+        validate_tacq_samples([row], 41, "manifest", config)
         with self.assertRaisesRegex(RuntimeError, "stopped evaluator contract"):
-            validate_tacq_samples([{**row, "prediction": "5"}], 41, "manifest")
+            validate_tacq_samples(
+                [{**row, "prediction": "5"}], 41, "manifest", config
+            )
+        with self.assertRaisesRegex(RuntimeError, "stopped evaluator contract"):
+            validate_tacq_samples(
+                [{**row, "tacq_mask_sha256": "another-mask"}],
+                41,
+                "manifest",
+                config,
+            )
+
+    def test_tacq_freeze_rejects_unverified_source_commit_before_data_access(self):
+        with self.assertRaisesRegex(ValueError, "pinned commit"):
+            tacq_protocol.freeze_manifest("a" * 40)
+
+    def test_tacq_requires_an_exact_untampered_shadow_pass(self):
+        root = Path(__file__).resolve().parent / f".test_shadow_pass_{uuid.uuid4().hex}"
+        rows = root / "rows"
+        rows.mkdir(parents=True)
+        paths = {}
+        for model in shadow_gate.SHADOW_MODELS:
+            for variant in shadow_gate.SHADOW_VARIANTS:
+                path = rows / f"{model}__{variant}.jsonl"
+                path.write_text('{"ok": true}\n', encoding="utf-8")
+                paths[(model, variant)] = path
+        manifest = {"manifest_sha256": "manifest", "total_formal_generations": 200}
+        receipt_path = root / "PASS.json"
+        receipt = {
+            "pass": True,
+            "manifest_sha256": "manifest",
+            "checks": {
+                "rows": 200,
+                "canonical_prefix_matches": 200,
+                "prediction_matches": 200,
+                "correctness_matches": 200,
+            },
+            "errors": [],
+            "row_file_sha256": {
+                f"{model}/{variant}": tacq_protocol.sha256(path)
+                for (model, variant), path in paths.items()
+            },
+        }
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        try:
+            with patch.object(
+                tacq_protocol, "SHADOW_RECEIPT", receipt_path
+            ), patch.object(
+                shadow_gate, "require_manifest", return_value=manifest
+            ), patch.object(
+                shadow_gate,
+                "output_path",
+                side_effect=lambda model, variant: paths[(model, variant)],
+            ):
+                tacq_protocol.require_shadow_pass()
+                paths[("qwen05", "gptq_w4")].write_text(
+                    '{"ok": false}\n', encoding="utf-8"
+                )
+                with self.assertRaisesRegex(RuntimeError, "changed after PASS"):
+                    tacq_protocol.require_shadow_pass()
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_smoke_receipt_requires_exact_state_and_all_32_train_generations(self):
+        manifest = {"manifest_sha256": "manifest"}
+        metadata = {
+            "model_key": "qwen05",
+            "calibration_seed": 41,
+            "state_sha256": "state",
+        }
+        receipt = {
+            "schema": "tacq-train-smoke-v1",
+            "pass": True,
+            "train_only": True,
+            "save_reload_validated": True,
+            "manifest_sha256": "manifest",
+            "model_key": "qwen05",
+            "calibration_seed": 41,
+            "generated": 32,
+            "state_sha256": "state",
+        }
+        self.assertTrue(
+            tacq_protocol._valid_smoke_receipt(receipt, manifest, metadata)
+        )
+        self.assertFalse(
+            tacq_protocol._valid_smoke_receipt(
+                {**receipt, "generated": 31}, manifest, metadata
+            )
+        )
 
     def test_official_contrastive_weight_product_formula(self):
         gradient = torch.tensor([2.0, 3.0])
@@ -199,12 +310,39 @@ class TacqMathTests(unittest.TestCase):
 
 
 class ServerPlanTests(unittest.TestCase):
+    def test_shadow_readiness_uses_the_untampered_pass_validator(self):
+        with patch.object(revision_readiness, "core_errors", return_value=[]), patch.object(
+            tacq_protocol,
+            "require_shadow_pass",
+            side_effect=RuntimeError("changed after PASS"),
+        ):
+            self.assertEqual(
+                revision_readiness.shadow_errors(),
+                ["invalid or missing question-stop shadow gate: changed after PASS"],
+            )
+
+    def test_existing_valid_shadow_manifest_is_a_restart_safe_noop(self):
+        root = Path(__file__).resolve().parent / f".test_shadow_{uuid.uuid4().hex}"
+        root.mkdir()
+        try:
+            manifest_path = root / "manifest.json"
+            manifest_path.write_text("{}", encoding="utf-8")
+            expected = {"manifest_sha256": "valid"}
+            with patch.object(shadow_gate, "MANIFEST_PATH", manifest_path), patch.object(
+                shadow_gate, "require_manifest", return_value=expected
+            ):
+                self.assertEqual(shadow_gate.prepare(), expected)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_shadow_and_tacq_are_separate_fail_closed_phases(self):
         shadow = make_tacq_plan.commands(1, "shadow")
         tacq = make_tacq_plan.commands(1, "tacq")
         self.assertIn("readiness.py --stage shadow", shadow[-1])
         self.assertFalse(any("capture-importance" in command for command in shadow))
-        self.assertIn("readiness.py --stage shadow", tacq[0])
+        self.assertIn("server_preflight.py", tacq[0])
+        self.assertTrue(any("server_preflight.py" in command for command in shadow))
+        self.assertIn("readiness.py --stage shadow", tacq[1])
         self.assertTrue(any("capture-importance" in command for command in tacq))
         self.assertEqual(make_tacq_plan.commands(1, "all"), shadow + tacq)
 
