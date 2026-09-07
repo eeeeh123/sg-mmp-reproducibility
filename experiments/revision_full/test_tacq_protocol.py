@@ -158,6 +158,17 @@ class TacqMathTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "pinned commit"):
             tacq_protocol.freeze_manifest("a" * 40)
 
+    def test_tacq_freeze_cannot_replace_a_missing_manifest_after_test_access(self):
+        with patch.object(tacq_protocol, "MANIFEST_PATH", Path("missing.json")), patch.object(
+            tacq_protocol, "require_shadow_pass", return_value={"pass": True}
+        ), patch.object(
+            tacq_protocol, "_existing_test_outputs", return_value=[Path("test.jsonl")]
+        ), patch.object(
+            tacq_protocol, "_existing_registrations", return_value=[]
+        ):
+            with self.assertRaisesRegex(RuntimeError, "after test output"):
+                tacq_protocol.freeze_manifest(tacq_protocol.OFFICIAL_SOURCE_COMMIT)
+
     def test_tacq_requires_an_exact_untampered_shadow_pass(self):
         root = Path(__file__).resolve().parent / f".test_shadow_pass_{uuid.uuid4().hex}"
         rows = root / "rows"
@@ -335,6 +346,92 @@ class ServerPlanTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_stale_shadow_manifest_is_immutable_after_formal_output(self):
+        root = Path(__file__).resolve().parent / f".test_shadow_{uuid.uuid4().hex}"
+        root.mkdir()
+        try:
+            manifest_path = root / "manifest.json"
+            manifest_path.write_text("{}", encoding="utf-8")
+            with patch.object(shadow_gate, "MANIFEST_PATH", manifest_path), patch.object(
+                shadow_gate,
+                "require_manifest",
+                side_effect=RuntimeError("commit changed"),
+            ), patch.object(
+                shadow_gate, "_shadow_has_started", return_value=True
+            ):
+                with self.assertRaisesRegex(RuntimeError, "refusing to change"):
+                    shadow_gate.prepare()
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_missing_shadow_manifest_cannot_replace_formal_output(self):
+        root = Path(__file__).resolve().parent / f".test_shadow_{uuid.uuid4().hex}"
+        root.mkdir()
+        try:
+            with patch.object(
+                shadow_gate, "MANIFEST_PATH", root / "missing.json"
+            ), patch.object(
+                shadow_gate, "_shadow_has_started", return_value=True
+            ), patch.object(
+                shadow_gate, "_tacq_has_started", return_value=False
+            ):
+                with self.assertRaisesRegex(RuntimeError, "without its frozen"):
+                    shadow_gate.prepare()
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_stale_empty_shadow_manifest_refreshes_after_code_update(self):
+        root = Path(__file__).resolve().parent / f".test_shadow_{uuid.uuid4().hex}"
+        root.mkdir()
+        sources = {}
+        for model in shadow_gate.SHADOW_MODELS:
+            for variant in shadow_gate.SHADOW_VARIANTS:
+                path = root / f"{model}__{variant}.jsonl"
+                path.write_text("source\n", encoding="utf-8")
+                sources[(model, variant)] = path
+        manifest_path = root / "manifest.json"
+        manifest_path.write_text("{}", encoding="utf-8")
+        try:
+            with patch.object(shadow_gate, "MANIFEST_PATH", manifest_path), patch.object(
+                shadow_gate,
+                "require_manifest",
+                side_effect=RuntimeError("commit changed"),
+            ), patch.object(
+                shadow_gate, "_shadow_has_started", return_value=False
+            ), patch.object(
+                shadow_gate, "_tacq_has_started", return_value=False
+            ), patch.object(
+                shadow_gate, "_tracked_worktree_is_clean", return_value=True
+            ), patch.object(
+                shadow_gate,
+                "source_path",
+                side_effect=lambda model, variant: sources[(model, variant)],
+            ), patch.object(
+                shadow_gate, "_complete_rows", return_value={}
+            ), patch.object(
+                shadow_gate, "_coverage_select", return_value=list(range(50))
+            ), patch.object(
+                shadow_gate.subprocess,
+                "run",
+                return_value=type("Result", (), {"stdout": "new-commit\n"})(),
+            ), patch(
+                "experiments.revision_full.run.dataset_provenance",
+                return_value={"manifest_sha256": "dataset"},
+            ), patch(
+                "experiments.revision_full.run.model_provenance",
+                return_value={"resolved_revision": "model"},
+            ):
+                refreshed = shadow_gate.prepare()
+            self.assertEqual(refreshed["implementation_commit"], "new-commit")
+            self.assertEqual(
+                json.loads(manifest_path.read_text(encoding="utf-8"))[
+                    "manifest_sha256"
+                ],
+                refreshed["manifest_sha256"],
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_shadow_and_tacq_are_separate_fail_closed_phases(self):
         shadow = make_tacq_plan.commands(1, "shadow")
         tacq = make_tacq_plan.commands(1, "tacq")
@@ -343,6 +440,14 @@ class ServerPlanTests(unittest.TestCase):
         self.assertIn("server_preflight.py", tacq[0])
         self.assertTrue(any("server_preflight.py" in command for command in shadow))
         self.assertIn("readiness.py --stage shadow", tacq[1])
+        required_artifacts = [
+            command
+            for command in shadow + tacq
+            if "build-bank" in command or " materialize " in command
+        ]
+        self.assertTrue(required_artifacts)
+        self.assertTrue(all("--require-output" in command for command in required_artifacts))
+        self.assertFalse(any("--force" in command for command in required_artifacts))
         self.assertTrue(any("capture-importance" in command for command in tacq))
         self.assertEqual(make_tacq_plan.commands(1, "all"), shadow + tacq)
 

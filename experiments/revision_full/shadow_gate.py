@@ -104,6 +104,10 @@ def _tacq_has_started() -> bool:
     )
 
 
+def _shadow_has_started() -> bool:
+    return RECEIPT_PATH.exists() or any((SHADOW_DIR / "rows").glob("*.jsonl"))
+
+
 def source_path(model_key: str, variant: str) -> Path:
     method = method_id(variant, RANDOM_CALIB_SEED)
     return (
@@ -165,10 +169,24 @@ def _coverage_select(w4: dict[int, dict], sg: dict[int, dict]) -> list[int]:
 
 def prepare(force: bool = False) -> dict:
     if MANIFEST_PATH.exists() and not force:
-        manifest = require_manifest()
-        print("[skip] existing valid Shadow manifest")
-        print(json.dumps(manifest, ensure_ascii=False, indent=2))
-        return manifest
+        try:
+            manifest = require_manifest()
+        except (KeyError, OSError, RuntimeError, ValueError, json.JSONDecodeError):
+            if _shadow_has_started() or _tacq_has_started():
+                raise RuntimeError(
+                    "Existing Shadow manifest is stale after formal Shadow/TaCQ "
+                    "output; refusing to change the frozen protocol"
+                )
+            print("[refresh] stale empty Shadow manifest")
+        else:
+            print("[skip] existing valid Shadow manifest")
+            print(json.dumps(manifest, ensure_ascii=False, indent=2))
+            return manifest
+    if not MANIFEST_PATH.exists() and (_shadow_has_started() or _tacq_has_started()):
+        raise RuntimeError(
+            "Shadow/TaCQ output exists without its frozen Shadow manifest; "
+            "refusing to create a replacement protocol"
+        )
     if not _tracked_worktree_is_clean():
         raise RuntimeError(
             "Refusing to freeze Shadow with tracked working-tree changes; "
@@ -176,7 +194,7 @@ def prepare(force: bool = False) -> dict:
         )
     if force and _tacq_has_started():
         raise RuntimeError("Refusing to change Shadow after the TaCQ phase started")
-    if force and any((SHADOW_DIR / "rows").glob("*.jsonl")):
+    if force and _shadow_has_started():
         raise RuntimeError("Refusing to change a manifest after shadow rows exist")
 
     from experiments.revision_full.run import dataset_provenance, model_provenance

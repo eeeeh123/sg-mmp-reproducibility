@@ -3,6 +3,7 @@ import shutil
 import sys
 import unittest
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -157,6 +158,91 @@ class LifecycleTests(unittest.TestCase):
 
         self.assertFalse(state.exists())
         self.assertTrue(metadata.exists())
+
+    def test_required_output_rebuilds_a_missing_bank_for_a_new_consumer(self):
+        bank_path = protocol.state_path("qwen05", 97, "precision_bank")
+        with patch.object(revision_run, "require_protocol"), patch.object(
+            revision_run, "bank_consumers_complete", return_value=True
+        ), patch.object(
+            revision_run,
+            "ram_builder_slot",
+            side_effect=lambda *args, **kwargs: nullcontext(),
+        ), patch.object(revision_run, "configure_determinism"), patch.object(
+            revision_run, "load_model_tokenizer", return_value=(object(), object())
+        ), patch.object(
+            revision_run, "frozen_wikitext_calibration", return_value=object()
+        ), patch.object(
+            revision_run, "model_provenance", return_value=self.model_snapshot
+        ), patch.object(
+            revision_run, "dataset_provenance", return_value=self.dataset_snapshot
+        ), patch(
+            "ptq.quant.mixed_precision.quantize_model_precision_bank",
+            return_value={"stub": {}},
+        ) as quantize, patch("ptq.eval.cleanup_gpu"):
+            self.assertEqual(
+                revision_run.build_bank("qwen05", 97, force=False), bank_path
+            )
+            self.assertFalse(bank_path.exists())
+            self.assertEqual(
+                revision_run.build_bank(
+                    "qwen05", 97, force=False, require_output=True
+                ),
+                bank_path,
+            )
+        self.assertTrue(bank_path.exists())
+        quantize.assert_called_once()
+
+    def test_required_output_materializes_a_missing_state_for_a_new_consumer(self):
+        bank_path = protocol.state_path("qwen05", 97, "precision_bank")
+        state_path = protocol.state_path("qwen05", 97, "gptq_w4")
+        bank_path.parent.mkdir(parents=True, exist_ok=True)
+        bank_path.write_bytes(b"bank")
+        selection = {
+            "selected_layers": [],
+            "w8_module_names": [],
+            "actual_avg_bits": 4.0,
+            "module_rows": [{"name": "stub", "n_params": 1}],
+        }
+
+        def save_state(_value, path):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"state")
+
+        with patch.object(
+            revision_run, "state_consumers_complete", return_value=True
+        ), patch.object(
+            revision_run, "require_current_state_metadata"
+        ), patch.object(
+            revision_run, "selection_for", return_value=selection
+        ), patch.object(
+            revision_run, "save_torch_atomic", side_effect=save_state
+        ), patch.object(
+            revision_run, "model_provenance", return_value=self.model_snapshot
+        ), patch.object(
+            revision_run, "dataset_provenance", return_value=self.dataset_snapshot
+        ), patch(
+            "torch.load", return_value={"stub": {}}
+        ), patch(
+            "ptq.quant.mixed_precision.compose_precision_state",
+            return_value={"stub": {"method": "gptq_w4"}},
+        ) as compose:
+            self.assertEqual(
+                revision_run.materialize("qwen05", 97, "gptq_w4", force=False),
+                state_path,
+            )
+            self.assertFalse(state_path.exists())
+            self.assertEqual(
+                revision_run.materialize(
+                    "qwen05",
+                    97,
+                    "gptq_w4",
+                    force=False,
+                    require_output=True,
+                ),
+                state_path,
+            )
+        self.assertTrue(state_path.exists())
+        compose.assert_called_once()
 
     def test_screen_state_cleanup_requires_exact_gptq_screen(self):
         variant = "screen_gptq_w4_split0"

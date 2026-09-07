@@ -29,9 +29,9 @@ def shadow_commands(gpu: int = 0) -> list[str]:
     for model in TACQ_MODELS:
         result.extend(
             [
-                f"CUDA_VISIBLE_DEVICES={gpu} {run} build-bank --model {model} --calib-seed 41",
-                f"{run} materialize --model {model} --calib-seed 41 --variant gptq_w4",
-                f"{run} materialize --model {model} --calib-seed 41 --variant sg_mmp",
+                f"CUDA_VISIBLE_DEVICES={gpu} {run} build-bank --model {model} --calib-seed 41 --require-output",
+                f"{run} materialize --model {model} --calib-seed 41 --variant gptq_w4 --require-output",
+                f"{run} materialize --model {model} --calib-seed 41 --variant sg_mmp --require-output",
                 f"CUDA_VISIBLE_DEVICES={gpu} {shadow} run --model {model} --variant gptq_w4",
                 f"CUDA_VISIBLE_DEVICES={gpu} {shadow} run --model {model} --variant sg_mmp",
             ]
@@ -77,7 +77,7 @@ def tacq_commands(gpu: int = 0) -> list[str]:
             # checkpoint; the bank is rebuilt if an earlier cleanup removed it.
             result.append(
                 f"if [[ ! -f {registration} ]]; then "
-                f"CUDA_VISIBLE_DEVICES={gpu} {run} build-bank --model {model} --calib-seed {seed}; "
+                f"CUDA_VISIBLE_DEVICES={gpu} {run} build-bank --model {model} --calib-seed {seed} --require-output; "
                 f"{tacq} build --model {model} --calib-seed {seed}; "
                 f"CUDA_VISIBLE_DEVICES={gpu} {tacq} smoke --model {model} --calib-seed {seed}; "
                 f"CUDA_VISIBLE_DEVICES={gpu} {tacq} evaluate --model {model} --calib-seed {seed}; "

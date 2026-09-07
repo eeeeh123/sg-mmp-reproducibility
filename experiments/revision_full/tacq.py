@@ -176,11 +176,10 @@ def freeze_manifest(source_commit: str, force: bool = False) -> dict:
             "TaCQ source commit differs from the locally verified pinned commit"
         )
     shadow = require_shadow_pass()
-    if (MANIFEST_PATH.exists() and not force) or (
-        force and (_existing_test_outputs() or _existing_registrations())
-    ):
-        if MANIFEST_PATH.exists() and not force:
-            return require_manifest()
+    downstream_outputs = _existing_test_outputs() or _existing_registrations()
+    if MANIFEST_PATH.exists() and not force:
+        return require_manifest()
+    if downstream_outputs:
         raise RuntimeError("Refusing to replace the TaCQ manifest after test output exists")
     if not _tracked_worktree_is_clean():
         raise RuntimeError(

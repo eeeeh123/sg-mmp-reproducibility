@@ -1150,7 +1150,12 @@ def save_torch_atomic(value, path: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def build_bank(model_key: str, calib_seed: int, force: bool) -> Path:
+def build_bank(
+    model_key: str,
+    calib_seed: int,
+    force: bool,
+    require_output: bool = False,
+) -> Path:
     from ptq.eval import cleanup_gpu
     from ptq.quant.mixed_precision import quantize_model_precision_bank
 
@@ -1162,7 +1167,7 @@ def build_bank(model_key: str, calib_seed: int, force: bool) -> Path:
             metadata_path, path, model_key, calib_seed, "precision_bank"
         )
         return path
-    if not force and bank_consumers_complete(model_key, calib_seed):
+    if not force and not require_output and bank_consumers_complete(model_key, calib_seed):
         status(
             "precision_bank_not_needed",
             model=model_key,
@@ -1295,7 +1300,13 @@ def _policy_for_variant(
     return policy, selected, selected_modules, allocation_details
 
 
-def materialize(model_key: str, calib_seed: int, variant: str, force: bool) -> Path:
+def materialize(
+    model_key: str,
+    calib_seed: int,
+    variant: str,
+    force: bool,
+    require_output: bool = False,
+) -> Path:
     import torch
     from ptq.quant.mixed_precision import compose_precision_state
 
@@ -1325,7 +1336,11 @@ def materialize(model_key: str, calib_seed: int, variant: str, force: bool) -> P
             metadata_path, output_path, model_key, calib_seed, variant
         )
         return output_path
-    if not force and state_consumers_complete(model_key, calib_seed, variant):
+    if (
+        not force
+        and not require_output
+        and state_consumers_complete(model_key, calib_seed, variant)
+    ):
         status(
             "state_not_needed",
             model=model_key,
@@ -1941,12 +1956,22 @@ def main() -> None:
     p.add_argument("--model", required=True)
     p.add_argument("--calib-seed", type=int, choices=CALIB_SEEDS, required=True)
     p.add_argument("--force", action="store_true")
+    p.add_argument(
+        "--require-output",
+        action="store_true",
+        help="reconstruct a missing bank even when its original consumers are complete",
+    )
 
     p = sub.add_parser("materialize")
     p.add_argument("--model", required=True)
     p.add_argument("--calib-seed", type=int, choices=CALIB_SEEDS, required=True)
     p.add_argument("--variant", required=True)
     p.add_argument("--force", action="store_true")
+    p.add_argument(
+        "--require-output",
+        action="store_true",
+        help="reconstruct a missing state for a new downstream consumer",
+    )
 
     p = sub.add_parser("quantize-uniform")
     p.add_argument("--model", required=True)
@@ -2041,9 +2066,24 @@ def main() -> None:
     elif args.command == "allocation-ids":
         print(" ".join(str(value) for value in allocation_ids(model_key, args.family)))
     elif args.command == "build-bank":
-        print(build_bank(model_key, args.calib_seed, args.force))
+        print(
+            build_bank(
+                model_key,
+                args.calib_seed,
+                args.force,
+                require_output=args.require_output,
+            )
+        )
     elif args.command == "materialize":
-        print(materialize(model_key, args.calib_seed, args.variant, args.force))
+        print(
+            materialize(
+                model_key,
+                args.calib_seed,
+                args.variant,
+                args.force,
+                require_output=args.require_output,
+            )
+        )
     elif args.command == "quantize-uniform":
         print(quantize_uniform(model_key, args.calib_seed, args.bits, args.force))
     elif args.command == "evaluate-allocation":

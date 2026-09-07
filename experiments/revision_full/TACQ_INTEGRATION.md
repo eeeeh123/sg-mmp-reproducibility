@@ -71,7 +71,11 @@ bash -n server_plans/tacq_serial.sh
 Each phase begins with the two-GPU/server-RAM preflight. The TaCQ plan rechecks
 the Shadow receipt at its boundary. It skips a seed only when its validated
 registration exists; otherwise it resumes the seed from its validated artifacts.
-Do not use `--force` after any downstream test output exists.
+An empty stale Shadow manifest may be refreshed after a code update, but any
+formal Shadow row or PASS makes the freeze immutable. Missing reconstructible
+banks/states required by this add-on are recreated with `--require-output`,
+which reuses a valid artifact when present and never overwrites it. Do not use
+`--force` after any downstream test output exists.
 
 ## Statistical contract
 
