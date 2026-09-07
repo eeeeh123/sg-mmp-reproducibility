@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import json
 import math
 import os
+import platform
 import random
 import shutil
 import subprocess
@@ -27,9 +29,11 @@ import numpy as np
 sys.path.insert(0, ".")
 
 from experiments.revision_full.protocol import (
+    BASE_GENERATION_KWARGS_SHA256,
     CALIB_SEEDS,
     DEFAULT_EVAL_BATCH_SIZE,
     ELIGIBLE_SHORT_NAMES,
+    EXTERNAL_BASELINE_GENERATION_PROTOCOL,
     GSM8K_TEST_SIZE,
     GROUP_SIZE,
     MAX_NEW_TOKENS,
@@ -40,15 +44,9 @@ from experiments.revision_full.protocol import (
     state_metadata_path,
     state_path,
 )
-from experiments.revision_full.question_stop import (
-    BASE_GENERATION_KWARGS_SHA256,
-    STOP_PROTOCOL,
-    GeneratedQuestionStopLogitsProcessor,
-)
-from experiments.revision_full.shadow_gate import RECEIPT_PATH as SHADOW_RECEIPT
-
-
 TACQ_MODELS = ("qwen05", "qwen15")
+GENERATION_PROTOCOL = EXTERNAL_BASELINE_GENERATION_PROTOCOL
+CONTROL_VARIANT = "sg_mmp_contemporary"
 OFFICIAL_SOURCE_URL = "https://github.com/The-Inscrutable-X/TACQ"
 OFFICIAL_SOURCE_COMMIT = "cfc4cccfb6b7d6f7d184c9fbc8f9373c3e74569a"
 IMPORTANCE_N = 128
@@ -94,6 +92,23 @@ def write_json(path: Path, value) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def runtime_environment() -> dict:
+    packages = {}
+    for name in ("torch", "transformers", "numpy", "datasets"):
+        try:
+            packages[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            packages[name] = None
+    import torch
+
+    return {
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "packages": packages,
+        "torch_cuda": torch.version.cuda,
+    }
+
+
 def save_torch_atomic(value, path: Path) -> None:
     import torch
 
@@ -110,9 +125,10 @@ def require_shadow_pass() -> dict:
     from experiments.revision_full import shadow_gate
 
     shadow_manifest = shadow_gate.require_manifest()
-    if not SHADOW_RECEIPT.exists():
+    shadow_receipt = shadow_gate.RECEIPT_PATH
+    if not shadow_receipt.exists():
         raise RuntimeError("Shadow question-stop gate has not passed")
-    receipt = json.loads(SHADOW_RECEIPT.read_text(encoding="utf-8"))
+    receipt = json.loads(shadow_receipt.read_text(encoding="utf-8"))
     expected = int(shadow_manifest["total_formal_generations"])
     checks = receipt.get("checks", {})
     if (
@@ -143,11 +159,21 @@ def require_shadow_pass() -> dict:
 
 
 def _existing_test_outputs() -> list[Path]:
-    return sorted((RESULTS_DIR / "samples").glob("*__external_tacq__c*__gsm8k1319.jsonl"))
+    return sorted(
+        list((RESULTS_DIR / "samples").glob("*__external_tacq__c*__gsm8k1319.jsonl"))
+        + list(
+            (RESULTS_DIR / "samples").glob(
+                "*__external_sg_contemporary__c*__gsm8k1319.jsonl"
+            )
+        )
+    )
 
 
 def _existing_registrations() -> list[Path]:
-    return sorted((OUT / "external_baselines").glob("*__tacq__c*.json"))
+    return sorted(
+        list((OUT / "external_baselines").glob("*__tacq__c*.json"))
+        + list((TACQ_DIR / "controls").glob("*__sg_contemporary__c*.json"))
+    )
 
 
 def _test_output_path(model_key: str, calib_seed: int) -> Path:
@@ -156,6 +182,18 @@ def _test_output_path(model_key: str, calib_seed: int) -> Path:
         / "samples"
         / f"{model_key}__external_tacq__c{calib_seed}__gsm8k{GSM8K_TEST_SIZE}.jsonl"
     )
+
+
+def _control_output_path(model_key: str, calib_seed: int) -> Path:
+    return (
+        RESULTS_DIR
+        / "samples"
+        / f"{model_key}__external_sg_contemporary__c{calib_seed}__gsm8k{GSM8K_TEST_SIZE}.jsonl"
+    )
+
+
+def control_record_path(model_key: str, calib_seed: int) -> Path:
+    return TACQ_DIR / "controls" / f"{model_key}__sg_contemporary__c{calib_seed}.json"
 
 
 def _tracked_worktree_is_clean() -> bool:
@@ -175,7 +213,6 @@ def freeze_manifest(source_commit: str, force: bool = False) -> dict:
         raise ValueError(
             "TaCQ source commit differs from the locally verified pinned commit"
         )
-    shadow = require_shadow_pass()
     downstream_outputs = _existing_test_outputs() or _existing_registrations()
     if MANIFEST_PATH.exists() and not force:
         return require_manifest()
@@ -221,17 +258,16 @@ def freeze_manifest(source_commit: str, force: bool = False) -> dict:
         Path(__file__),
         Path(__file__).with_name("analyze.py"),
         Path(__file__).with_name("external_baselines.py"),
+        Path(__file__).with_name("make_tacq_plan.py"),
         Path(__file__).with_name("protocol.py"),
-        Path(__file__).with_name("question_stop.py"),
         Path(__file__).with_name("readiness.py"),
         Path(__file__).with_name("run.py"),
-        Path(__file__).with_name("shadow_gate.py"),
         repository_root / "experiments" / "fix_gsm8k_500" / "direct_eval.py",
         repository_root / "ptq" / "quant" / "gptq.py",
         repository_root / "ptq" / "quant" / "mixed_precision.py",
     ]
     manifest = {
-        "schema": "tacq-shared-backend-freeze-v1",
+        "schema": "tacq-contemporary-sg-extension-freeze-v3",
         "protocol_version": PROTOCOL_VERSION,
         "method_label": "TaCQ shared-backend adaptation",
         "official_source_url": OFFICIAL_SOURCE_URL,
@@ -246,12 +282,19 @@ def freeze_manifest(source_commit: str, force: bool = False) -> dict:
         "calibration_seeds": list(CALIB_SEEDS),
         "dataset_provenance": dataset_provenance(),
         "model_provenance": {key: model_provenance(key) for key in TACQ_MODELS},
+        "runtime_environment": runtime_environment(),
         "sg_selections_sha256": {
             key: json_hash(selection_for(key)) for key in TACQ_MODELS
         },
-        "shadow_receipt_sha256": sha256(SHADOW_RECEIPT),
+        "protocol_history": {
+            "v1": "original max_new_tokens=256 generation used by the completed core experiment",
+            "v2_candidate": "online generated-Question stopping failed its pre-specified exact Shadow gate and was rejected before TaCQ test execution",
+            "v3": "external-baseline extension retaining v1 generation semantics and adding six contemporaneous SG-MMP controls",
+            "shadow_is_not_a_tacq_prerequisite": True,
+            "failed_shadow_rows_must_not_be_used_for_method_or_evaluator_tuning": True,
+        },
         "test_data_used_for_importance_allocation_or_tuning": False,
-        "test_access": "one locked final 1319-item evaluation per model and calibration seed after all gates pass",
+        "test_access": "one locked paired SG-contemporary/TaCQ 1319-item evaluation per model and calibration seed after all train-only gates pass",
         "importance": {
             "dataset": "openai/gsm8k/main:train",
             "sample_count": IMPORTANCE_N,
@@ -310,11 +353,12 @@ def freeze_manifest(source_commit: str, force: bool = False) -> dict:
             "deterministic mask digest",
             "state save/reload and 32 train-only generations",
             "logical average bits within 0.01 of and not above SG",
-            "shadow question-stop PASS receipt",
+            "original max_new_tokens=256 generation semantics for both arms",
+            "paired contemporaneous SG-MMP control for every model/seed",
         ],
         "inference": {
             "per_seed": "paired bootstrap and exact McNemar; diagnostic only",
-            "primary": "model-level hierarchical bootstrap over calibration seeds and paired examples",
+            "primary": "model-level hierarchical bootstrap over calibration seeds and paired examples, comparing contemporaneously regenerated SG-MMP with TaCQ",
             "multiplicity": "Holm over exactly two model-level SG-minus-TaCQ hypotheses",
         },
         "generation": {
@@ -323,8 +367,18 @@ def freeze_manifest(source_commit: str, force: bool = False) -> dict:
             "prompt": "locked direct 5-shot",
             "decoding": "greedy",
             "max_new_tokens": MAX_NEW_TOKENS,
-            "online_stop": STOP_PROTOCOL,
+            "online_stop": False,
+            "generation_protocol": GENERATION_PROTOCOL,
             "base_generation_kwargs_sha256": BASE_GENERATION_KWARGS_SHA256,
+        },
+        "paired_controls": {
+            "method": "SG-MMP",
+            "models": list(TACQ_MODELS),
+            "calibration_seeds": list(CALIB_SEEDS),
+            "cells": len(TACQ_MODELS) * len(CALIB_SEEDS),
+            "same_code_environment_prompt_evaluator_and_generation_implementation": True,
+            "same_seed_specific_precision_bank_as_tacq": True,
+            "old_core_outputs_are_not_replaced_or_pooled": True,
         },
     }
     manifest["manifest_sha256"] = json_hash(manifest)
@@ -342,8 +396,15 @@ def require_manifest() -> dict:
     manifest["manifest_sha256"] = claimed
     if claimed != actual:
         raise RuntimeError("TaCQ frozen manifest hash mismatch")
-    if manifest["official_source_url"] != OFFICIAL_SOURCE_URL:
-        raise RuntimeError("TaCQ source URL changed")
+    if (
+        manifest.get("schema") != "tacq-contemporary-sg-extension-freeze-v3"
+        or manifest.get("official_source_url") != OFFICIAL_SOURCE_URL
+        or manifest.get("models") != list(TACQ_MODELS)
+        or manifest.get("calibration_seeds") != list(CALIB_SEEDS)
+    ):
+        raise RuntimeError("TaCQ frozen design identity changed")
+    if manifest.get("runtime_environment") != runtime_environment():
+        raise RuntimeError("Runtime environment changed after the TaCQ freeze")
     current_commit = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         check=True,
@@ -356,9 +417,24 @@ def require_manifest() -> dict:
     for relative, expected in manifest.get("implementation_files_sha256", {}).items():
         if sha256(repository_root / relative) != expected:
             raise RuntimeError(f"TaCQ implementation file changed after freeze: {relative}")
-    require_shadow_pass()
-    if manifest.get("shadow_receipt_sha256") != sha256(SHADOW_RECEIPT):
-        raise RuntimeError("Shadow PASS receipt changed after the TaCQ freeze")
+    generation = manifest.get("generation", {})
+    if (
+        generation.get("online_stop") is not False
+        or generation.get("generation_protocol") != GENERATION_PROTOCOL
+        or int(generation.get("max_new_tokens", -1)) != MAX_NEW_TOKENS
+        or generation.get("base_generation_kwargs_sha256")
+        != BASE_GENERATION_KWARGS_SHA256
+    ):
+        raise RuntimeError("TaCQ manifest does not retain the original generation protocol")
+    controls = manifest.get("paired_controls", {})
+    if (
+        controls.get("cells") != len(TACQ_MODELS) * len(CALIB_SEEDS)
+        or controls.get("models") != list(TACQ_MODELS)
+        or controls.get("calibration_seeds") != list(CALIB_SEEDS)
+        or controls.get("same_seed_specific_precision_bank_as_tacq") is not True
+        or controls.get("old_core_outputs_are_not_replaced_or_pooled") is not True
+    ):
+        raise RuntimeError("TaCQ manifest does not freeze all contemporaneous SG controls")
     return manifest
 
 
@@ -838,7 +914,7 @@ def build_state(model_key: str, calib_seed: int, force: bool = False) -> Path:
             "Qwen2.5-0.5B/1.5B causal-LM loader",
             "shared locked GPTQ-W4 group-128 backend for controlled allocation comparison",
             "global element mask materialized as bit-packed FP16 exceptions",
-            "canonical direct GSM8K evaluator with shadow-validated generated-question stop",
+            "canonical direct GSM8K evaluator with the original max_new_tokens=256 generation semantics",
         ],
         "adaptation_freeze": adaptation_freeze,
         "budget_search": {
@@ -862,7 +938,8 @@ def build_state(model_key: str, calib_seed: int, force: bool = False) -> Path:
             "prompt": "direct 5-shot",
             "decoding": "greedy",
             "max_new_tokens": MAX_NEW_TOKENS,
-            "online_stop": STOP_PROTOCOL,
+            "online_stop": False,
+            "generation_protocol": GENERATION_PROTOCOL,
         },
     }
     write_json(config_path, config)
@@ -898,12 +975,22 @@ def build_state(model_key: str, calib_seed: int, force: bool = False) -> Path:
     return output
 
 
-def _configure_eval(model_key: str, calib_seed: int):
+def _configure_eval(model_key: str, calib_seed: int, variant: str = "tacq"):
     from experiments.fix_gsm8k_500 import direct_eval as direct
     from experiments.revision_full.run import dataset_provenance, model_provenance
 
-    method = f"external_tacq__c{calib_seed}"
-    state = state_path(model_key, calib_seed, "tacq")
+    if variant == "tacq":
+        method = f"external_tacq__c{calib_seed}"
+        state = state_path(model_key, calib_seed, "tacq")
+        label = "TaCQ shared-backend adaptation"
+        role = "external_baseline"
+    elif variant == CONTROL_VARIANT:
+        method = f"external_sg_contemporary__c{calib_seed}"
+        state = state_path(model_key, calib_seed, "sg_mmp")
+        label = "SG-MMP contemporaneous control"
+        role = "contemporaneous_control"
+    else:
+        raise ValueError(f"unknown extension evaluation variant: {variant}")
     direct.OUT = RESULTS_DIR / "runtime" / model_key
     direct.SAMPLE_DIR = RESULTS_DIR / "samples"
     direct.LOG_DIR = RESULTS_DIR / "logs"
@@ -921,14 +1008,14 @@ def _configure_eval(model_key: str, calib_seed: int):
     }
     direct.METHOD_SPECS = {
         method: {
-            "label": "TaCQ shared-backend adaptation",
+            "label": label,
             "kind": "mixed",
             "state": state,
             "models": {model_key},
         }
     }
     direct.CORE_METHODS = [method]
-    direct.ONLINE_QUESTION_STOP = True
+    direct.ONLINE_QUESTION_STOP = False
     direct.ROW_METADATA = {
         "protocol_version": PROTOCOL_VERSION,
         "dataset_manifest_sha256": dataset_provenance()["manifest_sha256"],
@@ -936,6 +1023,11 @@ def _configure_eval(model_key: str, calib_seed: int):
         "canonical_test_set": "openai/gsm8k/main:test:all-1319",
         "tacq_manifest_sha256": require_manifest()["manifest_sha256"],
         "calibration_seed": calib_seed,
+        "generation_protocol": GENERATION_PROTOCOL,
+        "online_question_stop": False,
+        "base_generation_kwargs_sha256": BASE_GENERATION_KWARGS_SHA256,
+        "external_extension_role": role,
+        "external_extension_method_id": method,
     }
     return direct, method
 
@@ -946,7 +1038,7 @@ def _smoke_receipt_path(model_key: str, calib_seed: int) -> Path:
 
 def _valid_smoke_receipt(receipt: dict, manifest: dict, metadata: dict) -> bool:
     return (
-        receipt.get("schema") == "tacq-train-smoke-v1"
+        receipt.get("schema") == "tacq-train-smoke-v2"
         and receipt.get("pass") is True
         and receipt.get("train_only") is True
         and receipt.get("save_reload_validated") is True
@@ -956,6 +1048,9 @@ def _valid_smoke_receipt(receipt: dict, manifest: dict, metadata: dict) -> bool:
         == int(metadata.get("calibration_seed", -2))
         and int(receipt.get("generated", -1)) == 32
         and receipt.get("state_sha256") == metadata.get("state_sha256")
+        and receipt.get("generation_protocol") == GENERATION_PROTOCOL
+        and receipt.get("online_question_stop") is False
+        and int(receipt.get("max_new_tokens", -1)) == MAX_NEW_TOKENS
     )
 
 
@@ -1005,7 +1100,6 @@ def smoke(model_key: str, calib_seed: int) -> None:
     ids = [row["doc_id"] for row in manifest["importance"]["sample_records"][:32]]
     prefix = direct.build_fewshot(train, k=5)
     generated = 0
-    marker_count = 0
     with torch.no_grad():
         for start in range(0, len(ids), DEFAULT_EVAL_BATCH_SIZE):
             batch_ids = ids[start : start + DEFAULT_EVAL_BATCH_SIZE]
@@ -1017,32 +1111,29 @@ def smoke(model_key: str, calib_seed: int) -> None:
                 [train[index]["question"] for index in batch_ids],
             )
             encoded = tokenizer(prompts, return_tensors="pt", padding=True).to(model.device)
-            width = int(encoded["input_ids"].shape[1])
-            processor = GeneratedQuestionStopLogitsProcessor(
-                tokenizer, width, tokenizer.eos_token_id
-            )
             outputs = model.generate(
                 **encoded,
                 do_sample=False,
                 max_new_tokens=MAX_NEW_TOKENS,
                 pad_token_id=tokenizer.pad_token_id,
                 eos_token_id=tokenizer.eos_token_id,
-                logits_processor=[processor],
             )
+            width = int(encoded["input_ids"].shape[1])
             texts = tokenizer.batch_decode(outputs[:, width:], skip_special_tokens=True)
             if len(texts) != len(batch_ids) or any(not isinstance(text, str) for text in texts):
                 raise RuntimeError("TaCQ smoke generation returned invalid output")
-            marker_count += sum(processor.finished or [])
             generated += len(texts)
     receipt = {
-        "schema": "tacq-train-smoke-v1",
+        "schema": "tacq-train-smoke-v2",
         "pass": generated == 32,
         "manifest_sha256": manifest["manifest_sha256"],
         "model_key": model_key,
         "calibration_seed": calib_seed,
         "train_only": True,
         "generated": generated,
-        "marker_stops": marker_count,
+        "generation_protocol": GENERATION_PROTOCOL,
+        "online_question_stop": False,
+        "max_new_tokens": MAX_NEW_TOKENS,
         "state_sha256": metadata["state_sha256"],
         "save_reload_validated": True,
     }
@@ -1066,6 +1157,11 @@ def evaluate(model_key: str, calib_seed: int, force: bool = False) -> None:
     smoke_receipt = json.loads(smoke_path.read_text(encoding="utf-8"))
     if not _valid_smoke_receipt(smoke_receipt, manifest, metadata):
         raise RuntimeError("TaCQ train-only smoke gate is missing or stale")
+    control = require_contemporary_sg_control(model_key, calib_seed, manifest)
+    if control.get("source_precision_bank_sha256") != metadata.get(
+        "source_precision_bank_sha256"
+    ):
+        raise RuntimeError("TaCQ and contemporaneous SG did not use the same precision bank")
     _bind_smoke_to_config(metadata, smoke_path)
     config = json.loads(Path(metadata["config"]).read_text(encoding="utf-8"))
     if config.get("validity_receipts", {}).get(
@@ -1103,17 +1199,174 @@ def evaluate(model_key: str, calib_seed: int, force: bool = False) -> None:
     )
 
 
+def require_contemporary_sg_control(
+    model_key: str, calib_seed: int, manifest: dict | None = None
+) -> dict:
+    from experiments.fix_gsm8k_500.direct_eval import extract_prediction, is_correct
+    from experiments.revision_full.external_baselines import (
+        read_samples,
+        resolve_record_path,
+    )
+
+    manifest = manifest or require_manifest()
+    path = control_record_path(model_key, calib_seed)
+    if not path.exists():
+        raise RuntimeError(f"Missing contemporaneous SG control: {path}")
+    record = json.loads(path.read_text(encoding="utf-8"))
+    expected_method = f"external_sg_contemporary__c{calib_seed}"
+    if (
+        record.get("schema") != "tacq-contemporary-sg-control-v1"
+        or record.get("protocol_version") != PROTOCOL_VERSION
+        or record.get("manifest_sha256") != manifest["manifest_sha256"]
+        or record.get("model_key") != model_key
+        or int(record.get("calibration_seed", -1)) != calib_seed
+        or record.get("method_id") != expected_method
+        or record.get("generation_protocol") != GENERATION_PROTOCOL
+        or record.get("online_question_stop") is not False
+        or int(record.get("max_new_tokens", -1)) != MAX_NEW_TOKENS
+        or record.get("old_core_outputs_replaced_or_pooled") is not False
+    ):
+        raise RuntimeError(f"Invalid contemporaneous SG control identity: {path}")
+    samples = resolve_record_path(str(record["samples"]))
+    if not samples.exists() or sha256(samples) != record.get("samples_sha256"):
+        raise RuntimeError(f"Contemporaneous SG sample hash mismatch: {samples}")
+    rows = read_samples(samples)
+    model_identity = manifest["model_provenance"][model_key]
+    dataset_identity = manifest["dataset_provenance"]
+    invalid = [
+        row.get("doc_id")
+        for row in rows
+        if row.get("protocol_version") != PROTOCOL_VERSION
+        or row.get("dataset_manifest_sha256")
+        != dataset_identity["manifest_sha256"]
+        or row.get("model_revision") != model_identity["resolved_revision"]
+        or row.get("canonical_test_set") != "openai/gsm8k/main:test:all-1319"
+        or row.get("tacq_manifest_sha256") != manifest["manifest_sha256"]
+        or int(row.get("calibration_seed", -1)) != calib_seed
+        or row.get("generation_protocol") != GENERATION_PROTOCOL
+        or row.get("online_question_stop") is not False
+        or row.get("base_generation_kwargs_sha256")
+        != BASE_GENERATION_KWARGS_SHA256
+        or row.get("external_extension_role") != "contemporaneous_control"
+        or row.get("external_extension_method_id") != expected_method
+        or row.get("sg_state_sha256") != record.get("sg_state_sha256")
+        or row.get("source_precision_bank_sha256")
+        != record.get("source_precision_bank_sha256")
+        or int(row.get("eval_batch_size_per_gpu", -1))
+        != DEFAULT_EVAL_BATCH_SIZE
+        or int(row.get("max_new_tokens", -1)) != MAX_NEW_TOKENS
+        or extract_prediction(str(row.get("generation", "")))
+        != row.get("prediction")
+        or int(is_correct(row.get("prediction"), row.get("gold")))
+        != int(row.get("correct", -1))
+    ]
+    if invalid:
+        raise RuntimeError(
+            f"Contemporaneous SG samples violate the frozen contract: {invalid[:5]}"
+        )
+    return record
+
+
+def evaluate_contemporary_sg(
+    model_key: str, calib_seed: int, force: bool = False
+) -> None:
+    from experiments.revision_full.external_baselines import portable_path
+    from experiments.revision_full.run import require_current_state_metadata
+
+    manifest = require_manifest()
+    record_path = control_record_path(model_key, calib_seed)
+    if record_path.exists():
+        if force:
+            raise RuntimeError("Refusing --force after contemporaneous SG registration")
+        require_contemporary_sg_control(model_key, calib_seed, manifest)
+        print(f"[skip] valid contemporaneous SG control {model_key}/c{calib_seed}")
+        return
+    state = state_path(model_key, calib_seed, "sg_mmp")
+    require_current_state_metadata(
+        state_metadata_path(model_key, calib_seed, "sg_mmp"),
+        state,
+        model_key,
+        calib_seed,
+        "sg_mmp",
+    )
+    bank = state_path(model_key, calib_seed, "precision_bank")
+    require_current_state_metadata(
+        state_metadata_path(model_key, calib_seed, "precision_bank"),
+        bank,
+        model_key,
+        calib_seed,
+        "precision_bank",
+    )
+    state_sha = sha256(state)
+    bank_sha = sha256(bank)
+    tacq_registration = (
+        OUT / "external_baselines" / f"{model_key}__tacq__c{calib_seed}.json"
+    )
+    if tacq_registration.exists():
+        from experiments.revision_full.external_baselines import resolve_record_path
+
+        registered = json.loads(tacq_registration.read_text(encoding="utf-8"))
+        registered_config = json.loads(
+            resolve_record_path(str(registered["config"])).read_text(encoding="utf-8")
+        )
+        if registered_config.get("state_identity", {}).get(
+            "source_precision_bank_sha256"
+        ) != bank_sha:
+            raise RuntimeError(
+                "Cannot reconstruct a missing SG control from a different precision bank"
+            )
+    direct, method = _configure_eval(model_key, calib_seed, CONTROL_VARIANT)
+    direct.ROW_METADATA.update(
+        {
+            "sg_state_sha256": state_sha,
+            "source_precision_bank_sha256": bank_sha,
+        }
+    )
+    direct.evaluate(
+        model_key,
+        method,
+        GSM8K_TEST_SIZE,
+        DEFAULT_EVAL_BATCH_SIZE,
+        MAX_NEW_TOKENS,
+        force=force,
+    )
+    samples = direct.sample_path(model_key, method, GSM8K_TEST_SIZE)
+    record = {
+        "schema": "tacq-contemporary-sg-control-v1",
+        "protocol_version": PROTOCOL_VERSION,
+        "manifest_sha256": manifest["manifest_sha256"],
+        "model_key": model_key,
+        "model": MODEL_SPECS[model_key]["display_name"],
+        "method": "sg_mmp_contemporary",
+        "method_id": method,
+        "calibration_seed": calib_seed,
+        "generation_protocol": GENERATION_PROTOCOL,
+        "online_question_stop": False,
+        "max_new_tokens": MAX_NEW_TOKENS,
+        "samples": portable_path(samples),
+        "samples_sha256": sha256(samples),
+        "sg_state_sha256": state_sha,
+        "source_precision_bank_sha256": bank_sha,
+        "old_core_outputs_replaced_or_pooled": False,
+    }
+    write_json(record_path, record)
+    require_contemporary_sg_control(model_key, calib_seed, manifest)
+    print(json.dumps(record, ensure_ascii=False, indent=2))
+
+
 def cleanup(model_key: str, calib_seed: int | None = None) -> None:
     """Remove only reconstructible TaCQ intermediates after registered outputs."""
 
     from experiments.revision_full.external_baselines import validate
 
     validate()
+    manifest = require_manifest()
     seeds = [calib_seed] if calib_seed is not None else list(CALIB_SEEDS)
     for seed in seeds:
         record = OUT / "external_baselines" / f"{model_key}__tacq__c{seed}.json"
         if not record.exists():
             raise RuntimeError(f"Refusing cleanup before registration: {record}")
+        require_contemporary_sg_control(model_key, seed, manifest)
         score_dir = _score_dir(model_key, seed)
         if score_dir.exists():
             shutil.rmtree(score_dir)
@@ -1143,6 +1396,12 @@ def main() -> None:
     eval_parser.add_argument("--model", choices=TACQ_MODELS, required=True)
     eval_parser.add_argument("--calib-seed", type=int, choices=CALIB_SEEDS, required=True)
     eval_parser.add_argument("--force", action="store_true")
+    control_parser = sub.add_parser("evaluate-control")
+    control_parser.add_argument("--model", choices=TACQ_MODELS, required=True)
+    control_parser.add_argument(
+        "--calib-seed", type=int, choices=CALIB_SEEDS, required=True
+    )
+    control_parser.add_argument("--force", action="store_true")
     cleanup_parser = sub.add_parser("cleanup")
     cleanup_parser.add_argument("--model", choices=TACQ_MODELS, required=True)
     cleanup_parser.add_argument("--calib-seed", type=int, choices=CALIB_SEEDS)
@@ -1157,6 +1416,8 @@ def main() -> None:
         smoke(args.model, args.calib_seed)
     elif args.command == "evaluate":
         evaluate(args.model, args.calib_seed, args.force)
+    elif args.command == "evaluate-control":
+        evaluate_contemporary_sg(args.model, args.calib_seed, args.force)
     else:
         cleanup(args.model, args.calib_seed)
 

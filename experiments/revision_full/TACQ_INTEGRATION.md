@@ -1,19 +1,29 @@
-# Shadow-gated TaCQ shared-backend adaptation
+# TaCQ external-baseline extension with contemporaneous SG controls
 
-This add-on does not modify or rerun the 52 immutable core sample files. It
-addresses two separate questions in a fail-closed order:
+This extension does not modify, replace, or pool the 52 immutable core sample
+files. It asks one additional question: under the same eligible projection
+scope, seed-specific precision bank, original evaluator, and non-exceeding
+matched logical budget, how does SG-MMP compare with a disclosed TaCQ
+shared-backend adaptation?
 
-1. Does generated-only early stopping preserve the historical evaluator's
-   answer prefix, prediction, and correctness exactly?
-2. Under the same eligible projection scope and a non-exceeding ±0.01-bit
-   logical budget, does a TaCQ allocation outperform or underperform SG-MMP?
+## Protocol history
 
-The comparison must be called **TaCQ shared-backend adaptation**. The TaCQ
-importance formula is retained, while the GPTQ-W4 group-128 backend and direct
-GSM8K evaluator are shared with SG-MMP for controlled comparison. The actual
-serialized state includes redundant W4 values beneath the FP16 exception mask;
-therefore the experiment supports allocation-quality claims, not deployment
-speed or physical-memory claims.
+- **v1:** all completed core experiments used direct five-shot greedy generation
+  with `max_new_tokens=256` and no online stopping rule.
+- **v2 candidate:** a generated-only `Question:` stopping rule was tested on 200
+  formal Shadow generations. It failed the pre-specified exact-equivalence gate
+  (186/200 canonical prefixes, 192/200 extracted predictions, and 198/200
+  correctness labels matched) and was rejected before any TaCQ test evaluation.
+  The failed receipt and rows remain evidence; they must not be tuned against or
+  rerun under the same protocol identity.
+- **v3 external-baseline extension:** returns to v1 generation semantics. It adds
+  six TaCQ cells and six contemporaneously regenerated SG-MMP controls for two
+  Qwen models and three calibration seeds.
+
+The archived-output audit may be reported only as evidence that offline
+truncation at a subsequent `Question:` marker left archived flexible predictions
+unchanged. It is not evidence that online stopping and regeneration are exactly
+equivalent.
 
 ## Frozen source and adaptation
 
@@ -21,73 +31,74 @@ speed or physical-memory claims.
 - Pinned commit: `cfc4cccfb6b7d6f7d184c9fbc8f9373c3e74569a`
 - Models: Qwen2.5-0.5B and Qwen2.5-1.5B
 - Calibration seeds: 41, 97, 193
-- Importance: 128 deterministically selected GSM8K-train examples (the official
-  default scale), excluding the five fixed demonstration rows, batch 1, full
-  causal loss over the five-shot prompt plus worked answer, float16 gradient
-  computation under the locked loader, per-example absolute gradients, float32
-  sum, no normalization, and a 2,048-token limit
-- The clean gradient accumulator is computed once per model. Each seed uses its
-  own locked GPTQ-W4 perturbation and therefore its own score/mask.
+- Importance: 128 deterministically selected GSM8K-train examples, excluding
+  the five fixed demonstrations; batch 1; full causal loss over the five-shot
+  prompt plus worked answer; float16 gradient computation; per-example absolute
+  gradients accumulated in float32; no normalization; 2,048-token limit.
+- The clean gradient accumulator is computed once per model. Each calibration
+  seed uses its own locked GPTQ-W4 perturbation and therefore its own score/mask.
 - Allocation: global element-level W4/FP16 mask. The FP16 count is the largest
-  integer count that does not exceed the model's frozen SG-MMP logical budget.
-  Equal scores are resolved by module name and row-major index.
+  integer count that does not exceed the frozen SG-MMP logical budget. Equal
+  scores are resolved by module name and row-major index.
 - No importance count, loss, normalization, mask rule, bit rounding, or other
   TaCQ setting may change after the manifest is written or after inspecting a
-  TaCQ test output.
+  TaCQ or contemporaneous-SG test output.
 
-## Gates
+## Paired control contract
 
-`shadow_gate.py prepare` freezes 50 archived IDs per model. W4 and SG each
-replay those IDs, for 200 formal shadow generations. `verify` writes `PASS.json`
-only when all 200 canonical answer prefixes, extracted predictions, and
-correctness labels match the immutable old outputs exactly. The prompt is never
-scanned by the stop processor. A failed gate forbids TaCQ test evaluation.
-It also ends this preregistered add-on: do not tune the stop rule using failed
-Shadow rows and retry it under the same protocol identity.
+Every `(model, calibration_seed)` cell uses one reconstructed precision bank to
+materialize both the frozen SG-MMP state and the TaCQ state. Both arms use:
 
-`tacq.py freeze` then records every adaptation degree, input identity, model and
-dataset provenance, Shadow receipt, budget rule, and statistical plan. Gradient
-capture is checkpointed every 32 train examples. Each seed must subsequently
-pass formula/module/finite-score/mask/budget checks and a state save-reload plus
-32-generation train-only smoke test before the 1,319-item test command is
-available. The manifest hashes every implementation file that can affect the
-Shadow comparison or TaCQ evaluation. Each final sample row is bound to the
-exact state, deterministic mask, frozen manifest, and train-only smoke receipt;
-readiness revalidates those hashes before accepting a registration or analysis.
-Once any TaCQ test output exists, missing importance chunks, states, masks, or
-smoke receipts cannot be reconstructed in place.
+- the same repository commit and server environment;
+- the same complete 1,319-item GSM8K test set and direct five-shot prompt;
+- greedy generation with `max_new_tokens=256` and no online stop;
+- the same tokenizer, generation implementation, batch size, and flexible
+  extraction;
+- distinct sample files bound to their exact state hashes and the shared
+  precision-bank hash.
 
-Generate two conservative one-GPU plans. Run the TaCQ plan only after the
-Shadow plan exits successfully and `readiness --stage shadow` reports
-`"ready": true`:
+TaCQ test evaluation is blocked until the corresponding contemporaneous SG
+control has completed and validated. Cleanup is blocked until both registrations
+exist. The old core SG files remain the source for the core paper tables; only
+the new control files enter the SG-versus-TaCQ extension table.
+
+## Gates and execution
+
+`tacq.py freeze` records every adaptation degree, input identity, model and
+dataset provenance, protocol history, paired-control matrix, generation
+semantics, and statistical plan before new test access. Gradient capture is
+checkpointed every 32 train examples. Each seed must pass formula, module,
+finite-score, deterministic-mask, logical-budget, save/reload, and 32-generation
+train-only smoke checks.
+
+The smoke check and both formal arms use the original generation path; none uses
+the rejected online stopping processor. Each sample row is bound to the frozen
+manifest and state evidence. Readiness revalidates hashes and confirms that SG
+and TaCQ used the same seed-specific precision bank.
+
+Generate the conservative one-GPU extension plan:
 
 ```bash
-python experiments/revision_full/make_tacq_plan.py --phase shadow > server_plans/shadow_gate.sh
 python experiments/revision_full/make_tacq_plan.py --phase tacq > server_plans/tacq_serial.sh
-bash -n server_plans/shadow_gate.sh
 bash -n server_plans/tacq_serial.sh
 ```
 
-Each phase begins with the two-GPU/server-RAM preflight. The TaCQ plan rechecks
-the Shadow receipt at its boundary. It skips a seed only when its validated
-registration exists; otherwise it resumes the seed from its validated artifacts.
-An empty stale Shadow manifest may be refreshed after a code update, but any
-formal Shadow row or PASS makes the freeze immutable. Missing reconstructible
-banks/states required by this add-on are recreated with `--require-output`,
-which reuses a valid artifact when present and never overwrites it. Do not use
-`--force` after any downstream test output exists.
+`--phase all` is an alias for this v3 extension. `--phase shadow` deliberately
+produces a failing script so the rejected v2 candidate cannot be accidentally
+rerun. The plan first runs local tests, server preflight, and core readiness. It
+then freezes the manifest, creates paired cells, analyzes them, and checks TaCQ
+and resubmission readiness. It never uses `--force`.
 
 ## Statistical contract
 
-Each seed retains paired bootstrap and exact McNemar results as diagnostics.
-They are not six independent scientific hypotheses. The primary inference is
-one SG-minus-TaCQ effect per model using the same two-stage calibration-seed /
-paired-example bootstrap as the core SG-minus-W4 analysis. A paired-item
-cluster sign-flip test supplies the model-level p-value, and Holm correction is
-applied to exactly the two model-level hypotheses.
+Each seed retains paired bootstrap and exact McNemar results as diagnostics;
+the six seed runs are not six independent scientific hypotheses. The primary
+inference is one contemporaneous-SG-minus-TaCQ effect per model, using the same
+two-stage calibration-seed / paired-example bootstrap as the core analysis. A
+paired-item cluster sign-flip test supplies each model-level p-value, and Holm
+correction is applied to exactly the two model-level hypotheses.
 
-`readiness.py --stage tacq` checks all six registrations, both model-level
-effects, the three diagnostic seeds per model, the two-test Holm family, the
-manifest, the Shadow receipt, and both bit ledgers. HAWQ-V2 and human error
-taxonomy are explicitly not claimed; no internal surrogate is relabelled as an
-external method.
+The method must be called **TaCQ shared-backend adaptation**. The state contains
+redundant W4 values beneath the FP16 exception mask, so the extension supports
+allocation-quality claims, not deployment speed or physical-memory claims.
+HAWQ-V2 and a human error taxonomy are not claimed.

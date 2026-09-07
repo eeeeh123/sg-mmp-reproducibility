@@ -703,15 +703,27 @@ def analyze() -> dict:
                 continue
             diagnostics = []
             pairs = []
+            control_records = {}
+            from experiments.revision_full.tacq import (
+                require_contemporary_sg_control,
+                require_manifest as require_tacq_manifest,
+            )
+
+            tacq_manifest = require_tacq_manifest()
             for calib_seed in CALIB_SEEDS:
                 record = seeded[calib_seed]
                 external = correctness(model_key, record["method_id"])
-                sg = correctness(model_key, method_id("sg_mmp", calib_seed))
+                control = require_contemporary_sg_control(
+                    model_key, calib_seed, tacq_manifest
+                )
+                control_records[calib_seed] = control
+                sg = correctness(model_key, control["method_id"])
                 diagnostics.append(
                     {
                         "calibration_seed": calib_seed,
                         "sg_minus_tacq": paired(external, sg),
                         "inference_role": "diagnostic; not an independent primary hypothesis",
+                        "sg_control_samples_sha256": control["samples_sha256"],
                     }
                 )
                 pairs.append((external, sg))
@@ -725,6 +737,9 @@ def analyze() -> dict:
                     "model": records[0]["model"],
                     "method": external_method,
                     "method_label": "TaCQ shared-backend adaptation",
+                    "comparison_control": "contemporaneously regenerated SG-MMP",
+                    "generation_protocol": "original max_new_tokens=256; no online stop",
+                    "old_core_outputs_replaced_or_pooled": False,
                     "calibration_seeds": list(CALIB_SEEDS),
                     "parameter_weighted_average_bits": [
                         seeded[seed]["parameter_weighted_average_bits"]
@@ -740,6 +755,15 @@ def analyze() -> dict:
                             "samples_sha256": seeded[seed]["samples_sha256"],
                             "config_sha256": seeded[seed]["config_sha256"],
                             "source_commit": seeded[seed]["source_commit"],
+                            "sg_control_samples_sha256": control_records[seed][
+                                "samples_sha256"
+                            ],
+                            "sg_control_state_sha256": control_records[seed][
+                                "sg_state_sha256"
+                            ],
+                            "shared_precision_bank_sha256": control_records[seed][
+                                "source_precision_bank_sha256"
+                            ],
                         }
                         for seed in CALIB_SEEDS
                     ],
@@ -873,9 +897,9 @@ def analyze() -> dict:
         [
             "## External matched-budget baselines",
             "",
-            "Primary TaCQ inference aggregates three calibration seeds within each model. Per-seed paired tests are diagnostics; Holm correction covers exactly the two model-level hypotheses.",
+            "Primary TaCQ inference compares six contemporaneously regenerated SG-MMP controls with six TaCQ cells under the original max_new_tokens=256 evaluator. It aggregates three calibration seeds within each model; per-seed paired tests are diagnostics and Holm correction covers exactly the two model-level hypotheses. Old core SG outputs are not pooled into this table.",
             "",
-            "| Model | Method | Avg bits by seed | SG minus external | Hierarchical 95% CI | Holm p (2 models) |",
+            "| Model | Method | Avg bits by seed | Contemporary SG minus external | Hierarchical 95% CI | Holm p (2 models) |",
             "|---|---|---|---:|---|---:|",
         ]
     )

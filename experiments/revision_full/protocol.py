@@ -63,6 +63,17 @@ RAM_BUILDER_WAIT_TIMEOUT_SECONDS = float(
     os.environ.get("REVISION_FULL_RAM_BUILDER_WAIT_TIMEOUT_SECONDS", "0")
 )
 MAX_NEW_TOKENS = 256
+EXTERNAL_BASELINE_GENERATION_PROTOCOL = "original-max-new-tokens-256-v1"
+BASE_GENERATION_KWARGS = {
+    "do_sample": False,
+    "max_new_tokens": MAX_NEW_TOKENS,
+    "padding_side": "left",
+}
+BASE_GENERATION_KWARGS_SHA256 = hashlib.sha256(
+    json.dumps(
+        BASE_GENERATION_KWARGS, sort_keys=True, separators=(",", ":")
+    ).encode()
+).hexdigest()
 FEWSHOT_TRAIN_INDICES = tuple(range(5))
 
 if DEFAULT_EVAL_BATCH_SIZE <= 0 or DEFAULT_FORMAT_BATCH_SIZE <= 0:

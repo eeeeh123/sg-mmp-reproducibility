@@ -116,12 +116,10 @@ This diagnostic may support a mechanistic statement only if its corrected infere
 
 ## External baselines and final gates
 
-The accepted add-on is the shadow-gated **TaCQ shared-backend adaptation** described in `TACQ_INTEGRATION.md`. It uses the official pinned TaCQ importance rule, the shared locked GPTQ-W4 backend, three calibration seeds, and a non-exceeding 0.01-bit logical budget match. HAWQ-V2 is not run and no surrogate is renamed HAWQ-V2. Human error taxonomy is also waived, so the paper must not claim manually established error types; the existing automatic audit remains descriptive evidence only.
+The accepted add-on is the **TaCQ shared-backend adaptation with contemporaneous SG-MMP controls** described in `TACQ_INTEGRATION.md`. The online-stop candidate failed its exact Shadow gate and is not used or rerun. The extension retains the original `max_new_tokens=256` generation path, uses the official pinned TaCQ importance rule, the shared locked GPTQ-W4 backend, three calibration seeds, six newly generated SG controls, and a non-exceeding 0.01-bit logical budget match. HAWQ-V2 is not run and no surrogate is renamed HAWQ-V2. Human error taxonomy is also waived, so the paper must not claim manually established error types; the existing automatic audit remains descriptive evidence only.
 
 ```bash
-python experiments/revision_full/make_tacq_plan.py --phase shadow > server_plans/shadow_gate.sh
 python experiments/revision_full/make_tacq_plan.py --phase tacq > server_plans/tacq_serial.sh
-python experiments/revision_full/readiness.py --stage shadow
 python experiments/revision_full/external_baselines.py validate
 python experiments/revision_full/analyze.py
 python experiments/revision_full/readiness.py --stage core
@@ -130,8 +128,8 @@ python experiments/revision_full/readiness.py --stage resubmission
 ```
 
 - `core` requires all preregistered internal numerical experiments.
-- `shadow` requires exact 200/200 evaluator equivalence without modifying core outputs.
-- `tacq` requires six seed-level registrations but exactly two model-level primary hypotheses.
+- `shadow` is a retained historical failed gate; it is not a v3 prerequisite and must not be rerun for tuning.
+- `tacq` requires six TaCQ registrations paired to six contemporaneous SG controls, but exactly two model-level primary hypotheses.
 - `resubmission` additionally enforces the explicit HAWQ/human-label claim waivers.
 
 ## Result replacement policy

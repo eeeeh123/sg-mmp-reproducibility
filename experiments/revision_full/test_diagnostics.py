@@ -168,7 +168,8 @@ class DiagnosticTests(unittest.TestCase):
                             "n": 1319,
                             "decoding": "greedy",
                             "max_new_tokens": 256,
-                            "online_stop": "generated-question-marker-v1",
+                            "online_stop": False,
+                            "generation_protocol": "original-max-new-tokens-256-v1",
                         },
                         "calibration_seed": 41,
                         "adaptation_freeze": {

@@ -67,6 +67,7 @@
     "prompt": "direct 5-shot",
     "decoding": "greedy",
     "max_new_tokens": 256,
-    "online_stop": "generated-question-marker-v1"
+    "online_stop": false,
+    "generation_protocol": "original-max-new-tokens-256-v1"
   }
 }

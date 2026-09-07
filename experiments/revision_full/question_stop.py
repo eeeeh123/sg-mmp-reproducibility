@@ -8,29 +8,17 @@ answer extractor.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from dataclasses import dataclass
+
+from experiments.revision_full.protocol import (
+    BASE_GENERATION_KWARGS,
+    BASE_GENERATION_KWARGS_SHA256,
+)
 
 
 STOP_PROTOCOL = "generated-question-marker-v1"
 QUESTION_MARKER_RE = re.compile(r"(?:^|\n[ \t]*\n)[ \t]*Question[ \t]*:")
-BASE_GENERATION_KWARGS = {
-    "do_sample": False,
-    "max_new_tokens": 256,
-    "padding_side": "left",
-}
-
-
-def json_sha256(value) -> str:
-    payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(payload).hexdigest()
-
-
-BASE_GENERATION_KWARGS_SHA256 = json_sha256(BASE_GENERATION_KWARGS)
-
-
 @dataclass(frozen=True)
 class CanonicalGeneration:
     text: str

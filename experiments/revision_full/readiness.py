@@ -641,7 +641,7 @@ def shadow_errors() -> list[str]:
 
 
 def tacq_errors() -> list[str]:
-    errors = shadow_errors()
+    errors = core_errors()
     registration_evidence: dict[str, dict[int, dict]] = {
         "qwen05": {},
         "qwen15": {},
@@ -717,11 +717,30 @@ def tacq_errors() -> list[str]:
                 )
                 if not 0 <= gap <= 0.01:
                     raise RuntimeError(f"non-matched/non-conservative bit gap {gap}")
+                if manifest is None:
+                    raise RuntimeError("cannot bind paired control without frozen manifest")
+                from experiments.revision_full.tacq import (
+                    require_contemporary_sg_control,
+                )
+
+                control = require_contemporary_sg_control(
+                    model_key, calib_seed, manifest
+                )
+                shared_bank = control["source_precision_bank_sha256"]
+                if shared_bank != config_payload.get("state_identity", {}).get(
+                    "source_precision_bank_sha256"
+                ):
+                    raise RuntimeError(
+                        "TaCQ and contemporaneous SG control use different precision banks"
+                    )
                 registration_evidence[model_key][calib_seed] = {
                     "calibration_seed": calib_seed,
                     "samples_sha256": record["samples_sha256"],
                     "config_sha256": record["config_sha256"],
                     "source_commit": record["source_commit"],
+                    "sg_control_samples_sha256": control["samples_sha256"],
+                    "sg_control_state_sha256": control["sg_state_sha256"],
+                    "shared_precision_bank_sha256": shared_bank,
                 }
             except (KeyError, OSError, RuntimeError, ValueError) as exc:
                 errors.append(f"invalid TaCQ registration {model_key}/c{calib_seed}: {exc}")
@@ -748,6 +767,14 @@ def tacq_errors() -> list[str]:
                     registration_evidence[row["model_key"]].get(seed)
                     for seed in CALIB_SEEDS
                 ]
+                for row in primary
+            )
+            or any(
+                row.get("comparison_control")
+                != "contemporaneously regenerated SG-MMP"
+                or row.get("generation_protocol")
+                != "original max_new_tokens=256; no online stop"
+                or row.get("old_core_outputs_replaced_or_pooled") is not False
                 for row in primary
             )
             or any(

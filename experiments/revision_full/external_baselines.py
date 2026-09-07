@@ -13,17 +13,14 @@ from pathlib import Path
 sys.path.insert(0, ".")
 
 from experiments.revision_full.protocol import (
+    BASE_GENERATION_KWARGS_SHA256,
+    EXTERNAL_BASELINE_GENERATION_PROTOCOL,
     GSM8K_TEST_SIZE,
     MODEL_SPECS,
     OUT,
     PROTOCOL_VERSION,
     RESULTS_DIR,
     ROOT,
-)
-from experiments.revision_full.question_stop import (
-    BASE_GENERATION_KWARGS_SHA256,
-    STOP_PROTOCOL,
-    canonical_answer_prefix,
 )
 
 
@@ -220,8 +217,12 @@ def validate_external_config(
         or int(evaluator.get("max_new_tokens", -1)) != 256
     ):
         raise RuntimeError("External config does not use the canonical evaluator")
-    if method == "tacq" and evaluator.get("online_stop") != STOP_PROTOCOL:
-        raise RuntimeError("TaCQ config lacks the shadow-validated online stop")
+    if method == "tacq" and (
+        evaluator.get("online_stop") is not False
+        or evaluator.get("generation_protocol")
+        != EXTERNAL_BASELINE_GENERATION_PROTOCOL
+    ):
+        raise RuntimeError("TaCQ config does not retain the original generation protocol")
     counts = {
         int(bits): int(count)
         for bits, count in config["bit_width_parameter_counts"].items()
@@ -264,36 +265,37 @@ def validate_tacq_samples(
     invalid = [
         row.get("doc_id")
         for row in rows
-        if row.get("online_question_stop") is not True
-        or row.get("stop_protocol") != STOP_PROTOCOL
+        if row.get("online_question_stop") is not False
+        or row.get("generation_protocol")
+        != EXTERNAL_BASELINE_GENERATION_PROTOCOL
         or int(row.get("calibration_seed", -1)) != calibration_seed
         or row.get("tacq_manifest_sha256") != manifest_sha256
         or row.get("base_generation_kwargs_sha256")
         != BASE_GENERATION_KWARGS_SHA256
+        or row.get("external_extension_role") != "external_baseline"
+        or row.get("external_extension_method_id")
+        != f"external_tacq__c{calibration_seed}"
         or row.get("tacq_state_sha256") != identity.get("state_sha256")
         or row.get("tacq_mask_sha256") != identity.get("mask_sha256")
         or row.get("tacq_smoke_receipt_sha256")
         != validity.get("train_only_smoke_sha256")
-        or row.get("stop_reason")
-        not in {"generated_question_marker", "model_eos", "max_new_tokens"}
-        or not isinstance(row.get("raw_generation"), str)
-        or canonical_answer_prefix(str(row.get("raw_generation", ""))).text
-        != row.get("generation")
         or extract_prediction(str(row.get("generation", "")))
         != row.get("prediction")
         or int(is_correct(row.get("prediction"), row.get("gold")))
         != int(row.get("correct", -1))
-        or bool(row.get("truncated"))
-        != (row.get("stop_reason") == "max_new_tokens")
-        or bool(row.get("generated_question_marker_found"))
-        != (row.get("stop_reason") == "generated_question_marker")
+        or not 0 <= int(row.get("generated_token_count", -1)) <= 256
         or (
-            row.get("stop_reason") == "model_eos"
-            and row.get("ended_with_eos") is not True
+            bool(row.get("truncated"))
+            != (
+                int(row.get("generated_token_count", -1)) == 256
+                and row.get("ended_with_eos") is not True
+            )
         )
     ]
     if invalid:
-        raise RuntimeError(f"TaCQ samples violate the stopped evaluator contract: {invalid[:5]}")
+        raise RuntimeError(
+            f"TaCQ samples violate the original evaluator contract: {invalid[:5]}"
+        )
 
 
 def register(

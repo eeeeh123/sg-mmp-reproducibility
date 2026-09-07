@@ -1,4 +1,4 @@
-"""CPU-only tests for the Shadow/TaCQ gates and deterministic accounting."""
+"""CPU-only tests for the rejected Shadow candidate and TaCQ extension."""
 
 import json
 import math
@@ -91,62 +91,66 @@ class TacqMathTests(unittest.TestCase):
             "validity_receipts": {"train_only_smoke_sha256": "smoke"},
         }
 
-    def test_tacq_sample_contract_rejects_unstopped_or_cross_seed_rows(self):
+    def test_tacq_sample_contract_requires_original_protocol_and_seed(self):
         row = {
             "doc_id": 0,
-            "online_question_stop": True,
-            "stop_protocol": "generated-question-marker-v1",
+            "online_question_stop": False,
+            "generation_protocol": "original-max-new-tokens-256-v1",
             "calibration_seed": 41,
             "tacq_manifest_sha256": "manifest",
             "base_generation_kwargs_sha256": BASE_GENERATION_KWARGS_SHA256,
+            "external_extension_role": "external_baseline",
+            "external_extension_method_id": "external_tacq__c41",
             "tacq_state_sha256": "state",
             "tacq_mask_sha256": "mask",
             "tacq_smoke_receipt_sha256": "smoke",
-            "stop_reason": "model_eos",
-            "raw_generation": "work\n#### 4",
             "generation": "work\n#### 4",
+            "generated_token_count": 9,
             "prediction": "4",
             "gold": "4",
             "correct": 1,
             "truncated": False,
-            "generated_question_marker_found": False,
             "ended_with_eos": True,
         }
         config = self._sample_config()
         validate_tacq_samples([row], 41, "manifest", config)
-        with self.assertRaisesRegex(RuntimeError, "stopped evaluator contract"):
+        with self.assertRaisesRegex(RuntimeError, "original evaluator contract"):
             validate_tacq_samples(
                 [{**row, "calibration_seed": 97}], 41, "manifest", config
+            )
+        with self.assertRaisesRegex(RuntimeError, "original evaluator contract"):
+            validate_tacq_samples(
+                [{**row, "online_question_stop": True}], 41, "manifest", config
             )
 
     def test_tacq_sample_contract_recomputes_canonical_prediction_and_correctness(self):
         row = {
             "doc_id": 0,
-            "online_question_stop": True,
-            "stop_protocol": "generated-question-marker-v1",
+            "online_question_stop": False,
+            "generation_protocol": "original-max-new-tokens-256-v1",
             "calibration_seed": 41,
             "tacq_manifest_sha256": "manifest",
             "base_generation_kwargs_sha256": BASE_GENERATION_KWARGS_SHA256,
+            "external_extension_role": "external_baseline",
+            "external_extension_method_id": "external_tacq__c41",
             "tacq_state_sha256": "state",
             "tacq_mask_sha256": "mask",
             "tacq_smoke_receipt_sha256": "smoke",
-            "stop_reason": "generated_question_marker",
-            "raw_generation": "work\n#### 4\n\nQuestion: invented",
-            "generation": "work\n#### 4",
+            "generation": "work\n#### 4\n\nQuestion: invented",
+            "generated_token_count": 17,
             "prediction": "4",
             "gold": "4",
             "correct": 1,
             "truncated": False,
-            "generated_question_marker_found": True,
             "ended_with_eos": True,
         }
         config = self._sample_config()
         validate_tacq_samples([row], 41, "manifest", config)
-        with self.assertRaisesRegex(RuntimeError, "stopped evaluator contract"):
+        with self.assertRaisesRegex(RuntimeError, "original evaluator contract"):
             validate_tacq_samples(
                 [{**row, "prediction": "5"}], 41, "manifest", config
             )
-        with self.assertRaisesRegex(RuntimeError, "stopped evaluator contract"):
+        with self.assertRaisesRegex(RuntimeError, "original evaluator contract"):
             validate_tacq_samples(
                 [{**row, "tacq_mask_sha256": "another-mask"}],
                 41,
@@ -160,8 +164,6 @@ class TacqMathTests(unittest.TestCase):
 
     def test_tacq_freeze_cannot_replace_a_missing_manifest_after_test_access(self):
         with patch.object(tacq_protocol, "MANIFEST_PATH", Path("missing.json")), patch.object(
-            tacq_protocol, "require_shadow_pass", return_value={"pass": True}
-        ), patch.object(
             tacq_protocol, "_existing_test_outputs", return_value=[Path("test.jsonl")]
         ), patch.object(
             tacq_protocol, "_existing_registrations", return_value=[]
@@ -199,7 +201,7 @@ class TacqMathTests(unittest.TestCase):
         receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
         try:
             with patch.object(
-                tacq_protocol, "SHADOW_RECEIPT", receipt_path
+                shadow_gate, "RECEIPT_PATH", receipt_path
             ), patch.object(
                 shadow_gate, "require_manifest", return_value=manifest
             ), patch.object(
@@ -224,7 +226,7 @@ class TacqMathTests(unittest.TestCase):
             "state_sha256": "state",
         }
         receipt = {
-            "schema": "tacq-train-smoke-v1",
+            "schema": "tacq-train-smoke-v2",
             "pass": True,
             "train_only": True,
             "save_reload_validated": True,
@@ -233,6 +235,9 @@ class TacqMathTests(unittest.TestCase):
             "calibration_seed": 41,
             "generated": 32,
             "state_sha256": "state",
+            "generation_protocol": "original-max-new-tokens-256-v1",
+            "online_question_stop": False,
+            "max_new_tokens": 256,
         }
         self.assertTrue(
             tacq_protocol._valid_smoke_receipt(receipt, manifest, metadata)
@@ -318,6 +323,82 @@ class TacqMathTests(unittest.TestCase):
                 torch.tensor([[7.0, 0.0, 0.0, 9.0]], dtype=torch.float16),
             )
         )
+
+    def test_contemporary_sg_control_is_bound_to_manifest_state_and_bank(self):
+        root = Path(__file__).resolve().parent / f".test_control_{uuid.uuid4().hex}"
+        root.mkdir()
+        record_path = root / "control.json"
+        sample_path = root / "samples.jsonl"
+        sample_path.write_text("{}\n", encoding="utf-8")
+        manifest = {
+            "manifest_sha256": "manifest",
+            "dataset_provenance": {"manifest_sha256": "dataset"},
+            "model_provenance": {"qwen05": {"resolved_revision": "model"}},
+        }
+        record = {
+            "schema": "tacq-contemporary-sg-control-v1",
+            "protocol_version": "revision-full-v4",
+            "manifest_sha256": "manifest",
+            "model_key": "qwen05",
+            "calibration_seed": 41,
+            "method_id": "external_sg_contemporary__c41",
+            "generation_protocol": "original-max-new-tokens-256-v1",
+            "online_question_stop": False,
+            "max_new_tokens": 256,
+            "old_core_outputs_replaced_or_pooled": False,
+            "samples": str(sample_path),
+            "samples_sha256": "samplehash",
+            "sg_state_sha256": "statehash",
+            "source_precision_bank_sha256": "bankhash",
+        }
+        row = {
+            "doc_id": 0,
+            "protocol_version": "revision-full-v4",
+            "dataset_manifest_sha256": "dataset",
+            "model_revision": "model",
+            "canonical_test_set": "openai/gsm8k/main:test:all-1319",
+            "tacq_manifest_sha256": "manifest",
+            "calibration_seed": 41,
+            "generation_protocol": "original-max-new-tokens-256-v1",
+            "online_question_stop": False,
+            "base_generation_kwargs_sha256": BASE_GENERATION_KWARGS_SHA256,
+            "external_extension_role": "contemporaneous_control",
+            "external_extension_method_id": "external_sg_contemporary__c41",
+            "sg_state_sha256": "statehash",
+            "source_precision_bank_sha256": "bankhash",
+            "eval_batch_size_per_gpu": tacq_protocol.DEFAULT_EVAL_BATCH_SIZE,
+            "max_new_tokens": 256,
+            "generation": "work\n#### 4",
+            "prediction": "4",
+            "gold": "4",
+            "correct": 1,
+        }
+        record_path.write_text(json.dumps(record), encoding="utf-8")
+        try:
+            with patch.object(
+                tacq_protocol, "control_record_path", return_value=record_path
+            ), patch.object(
+                tacq_protocol, "sha256", return_value="samplehash"
+            ), patch(
+                "experiments.revision_full.external_baselines.resolve_record_path",
+                return_value=sample_path,
+            ), patch(
+                "experiments.revision_full.external_baselines.read_samples",
+                return_value=[row],
+            ):
+                self.assertEqual(
+                    tacq_protocol.require_contemporary_sg_control(
+                        "qwen05", 41, manifest
+                    )["source_precision_bank_sha256"],
+                    "bankhash",
+                )
+                row["online_question_stop"] = True
+                with self.assertRaisesRegex(RuntimeError, "frozen contract"):
+                    tacq_protocol.require_contemporary_sg_control(
+                        "qwen05", 41, manifest
+                    )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 class ServerPlanTests(unittest.TestCase):
@@ -432,24 +513,30 @@ class ServerPlanTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_shadow_and_tacq_are_separate_fail_closed_phases(self):
+    def test_rejected_shadow_is_not_rerun_and_extension_is_fail_closed(self):
         shadow = make_tacq_plan.commands(1, "shadow")
         tacq = make_tacq_plan.commands(1, "tacq")
-        self.assertIn("readiness.py --stage shadow", shadow[-1])
+        self.assertIn("exit 2", shadow[-1])
         self.assertFalse(any("capture-importance" in command for command in shadow))
-        self.assertIn("server_preflight.py", tacq[0])
-        self.assertTrue(any("server_preflight.py" in command for command in shadow))
-        self.assertIn("readiness.py --stage shadow", tacq[1])
+        self.assertTrue(any("server_preflight.py" in command for command in tacq))
+        self.assertFalse(any("shadow_gate.py" in command for command in tacq))
+        self.assertTrue(any("readiness.py --stage core" in command for command in tacq))
         required_artifacts = [
             command
-            for command in shadow + tacq
+            for command in tacq
             if "build-bank" in command or " materialize " in command
         ]
         self.assertTrue(required_artifacts)
         self.assertTrue(all("--require-output" in command for command in required_artifacts))
         self.assertFalse(any("--force" in command for command in required_artifacts))
         self.assertTrue(any("capture-importance" in command for command in tacq))
-        self.assertEqual(make_tacq_plan.commands(1, "all"), shadow + tacq)
+        self.assertEqual(make_tacq_plan.commands(1, "all"), tacq)
+        self.assertEqual(
+            sum("evaluate-control" in command for command in tacq), 6
+        )
+        self.assertEqual(
+            sum("tacq.py evaluate --model" in command for command in tacq), 6
+        )
 
     def test_tacq_plan_skips_registered_seed_but_resumes_partial_seed(self):
         plan = "\n".join(make_tacq_plan.commands(0, "tacq"))
@@ -457,8 +544,14 @@ class ServerPlanTests(unittest.TestCase):
             "experiments/revision_full/outputs/external_baselines/"
             "qwen05__tacq__c41.json"
         )
-        self.assertIn(f"if [[ ! -f {record} ]]; then", plan)
+        control = (
+            "experiments/revision_full/outputs/tacq/controls/"
+            "qwen05__sg_contemporary__c41.json"
+        )
+        self.assertIn(f"if [[ ! -f {record} || ! -f {control} ]]; then", plan)
         self.assertIn("build-bank --model qwen05 --calib-seed 41", plan)
+        self.assertIn("materialize --model qwen05 --calib-seed 41 --variant sg_mmp", plan)
+        self.assertIn("evaluate-control --model qwen05 --calib-seed 41", plan)
         self.assertIn("cleanup --model qwen05 --calib-seed 41", plan)
 
 
