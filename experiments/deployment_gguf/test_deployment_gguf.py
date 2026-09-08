@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from experiments.deployment_gguf import gates, quality
+from experiments.deployment_gguf import artifacts, gates, quality
 from experiments.deployment_gguf.analyze import _exact_mcnemar, paired_ratio
 from experiments.deployment_gguf.gguf_manifest import (
     hf_to_gguf_tensor,
@@ -200,6 +200,34 @@ class ProtocolTests(unittest.TestCase):
             )
             self.assertFalse(record["gate_passed"])
             self.assertEqual(record["tests_run"], 0)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_binary_provenance_does_not_require_quantize_version_flag(self):
+        root = Path(__file__).parent / f".test-{os.getpid()}-binary-provenance"
+        try:
+            root.mkdir(parents=True)
+            cli = root / "llama-cli"
+            quantize = root / "llama-quantize"
+            cli.write_bytes(b"cli")
+            quantize.write_bytes(b"quantize")
+
+            def fake_run(command, **_kwargs):
+                self.assertEqual(command, [str(cli), "--version"])
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=f"version: 1 ({LLAMA_CPP_COMMIT[:7]})\n",
+                    stderr="",
+                )
+
+            with mock.patch.object(artifacts.subprocess, "run", side_effect=fake_run):
+                record = artifacts._binary_provenance(
+                    {"cli": cli, "quantize": quantize}
+                )
+            self.assertTrue(record["cli"]["identifies_frozen_commit"])
+            self.assertIsNone(record["quantize"]["version_output"])
+            self.assertEqual(record["quantize"]["commit_attested_by"], ["cli"])
+            self.assertEqual(record["quantize"]["bytes"], len(b"quantize"))
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

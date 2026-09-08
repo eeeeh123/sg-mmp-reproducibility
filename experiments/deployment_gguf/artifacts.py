@@ -59,6 +59,48 @@ def _run_logged(command: list[str], log_path: Path, *, env: dict | None = None) 
         raise RuntimeError(f"Command failed ({result.returncode}); inspect {log_path}")
 
 
+def _binary_provenance(binaries: dict[str, Path]) -> dict:
+    """Hash every binary and require commit evidence from a version-capable tool."""
+    records = {
+        name: {
+            "sha256": sha256_file(binary),
+            "bytes": binary.stat().st_size,
+            "version_output": None,
+            "identifies_frozen_commit": False,
+        }
+        for name, binary in binaries.items()
+    }
+    version_carriers = []
+    for name in ("cli", "server", "bench"):
+        if name not in binaries:
+            continue
+        result = subprocess.run(
+            [str(binaries[name]), "--version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        version_text = (result.stdout + result.stderr).strip()
+        reported_commits = re.findall(
+            r"\(?`?([0-9a-f]{7,40})`?\)?", version_text, flags=re.IGNORECASE
+        )
+        identifies_commit = result.returncode == 0 and any(
+            LLAMA_CPP_COMMIT.startswith(item) for item in reported_commits
+        )
+        records[name]["version_output"] = version_text
+        records[name]["identifies_frozen_commit"] = identifies_commit
+        if identifies_commit:
+            version_carriers.append(name)
+    if not version_carriers:
+        raise RuntimeError(
+            "No version-capable llama.cpp binary identifies frozen commit "
+            f"{LLAMA_CPP_COMMIT}"
+        )
+    for record in records.values():
+        record["commit_attested_by"] = version_carriers
+    return records
+
+
 def require_llama_cpp(
     llama_cpp_dir: Path, *, minimum_free_disk_gib: float | None = None
 ) -> dict:
@@ -88,31 +130,16 @@ def require_llama_cpp(
     missing = [str(path) for path in binaries.values() if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"Missing pinned llama.cpp binaries: {missing}")
-    binary_versions = {}
-    for name, binary in binaries.items():
-        version_result = subprocess.run(
-            [str(binary), "--version"],
-            capture_output=True,
-            text=True,
-            timeout=30,
+    cache_path = root / "build" / "CMakeCache.txt"
+    if not cache_path.is_file():
+        raise FileNotFoundError(f"Missing CMake build provenance: {cache_path}")
+    cache_text = cache_path.read_text(encoding="utf-8", errors="replace")
+    source_match = re.search(r"^CMAKE_HOME_DIRECTORY:INTERNAL=(.+)$", cache_text, re.M)
+    if not source_match or Path(source_match.group(1)).resolve() != root:
+        raise RuntimeError(
+            f"CMake build directory is not bound to pinned checkout: {root}"
         )
-        version_text = version_result.stdout + version_result.stderr
-        reported_commits = re.findall(
-            r"\(`?([0-9a-f]{7,40})`?\)", version_text, flags=re.IGNORECASE
-        )
-        if (
-            version_result.returncode
-            or not reported_commits
-            or not any(LLAMA_CPP_COMMIT.startswith(item) for item in reported_commits)
-        ):
-            raise RuntimeError(
-                f"{name} binary is stale or does not identify pinned commit "
-                f"{LLAMA_CPP_COMMIT}: {version_text.strip()}"
-            )
-        binary_versions[name] = {
-            "sha256": sha256_file(binary),
-            "version_output": version_text.strip(),
-        }
+    binary_versions = _binary_provenance(binaries)
     converter = root / "convert_hf_to_gguf.py"
     if not converter.is_file():
         raise FileNotFoundError(converter)
@@ -190,6 +217,8 @@ def require_llama_cpp(
         "dirty": False,
         "binaries": {key: str(path) for key, path in binaries.items()},
         "binary_versions": binary_versions,
+        "cmake_cache_sha256": sha256_file(cache_path),
+        "cmake_source_directory": str(root),
         "conversion_python": str(conversion_python),
         "conversion_packages": sorted(
             line.strip() for line in freeze_result.stdout.splitlines() if line.strip()
