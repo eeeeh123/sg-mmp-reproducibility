@@ -23,7 +23,13 @@ from experiments.deployment_gguf.make_server_plan import (
     build_formal_extension_plan,
     build_plan,
 )
-from experiments.deployment_gguf.protocol import LLAMA_CPP_COMMIT, protocol_lock
+from experiments.deployment_gguf.protocol import (
+    BACKEND_ADD_STABILITY_REPETITIONS,
+    BACKEND_TEST_GPUS,
+    LLAMA_CPP_COMMIT,
+    REQUIRED_CMAKE_TOOLCHAIN,
+    protocol_lock,
+)
 from experiments.deployment_gguf.quality import strict_prediction
 
 
@@ -113,6 +119,8 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn("--gpu 1 --block", value)
         self.assertIn("quality --model qwen15", value)
         self.assertIn("--gpu 0", value)
+        self.assertIn("unset CUDA_VISIBLE_DEVICES GGML_CUDA_DISABLE_GRAPHS", value)
+        self.assertIn("export CUDA_DEVICE_ORDER=PCI_BUS_ID", value)
         self.assertLess(
             value.index("packed-gate --model smollm"),
             value.index("quality --model qwen15"),
@@ -172,34 +180,187 @@ class ProtocolTests(unittest.TestCase):
             [("openai/gsm8k/main/train", "gsm8k-train.arrow")],
         )
 
-    def test_official_backend_gate_rejects_zero_tests(self):
-        root = Path(__file__).parent / f".test-{os.getpid()}-gate-status"
+    def test_cmake_build_provenance_requires_frozen_toolchain(self):
+        root = Path(__file__).parent / f".test-{os.getpid()}-cmake-provenance"
         try:
-            root.mkdir(parents=True)
-            binary = root / "fake-binary"
-            binary.write_bytes(b"binary")
-            with mock.patch.object(gates, "STATUS_DIR", root), mock.patch.object(
+            build = root / "build"
+            build.mkdir(parents=True)
+            cache = [f"CMAKE_HOME_DIRECTORY:INTERNAL={root.resolve()}"]
+            cache.extend(
+                f"{key}:FILEPATH={value}"
+                for key, value in REQUIRED_CMAKE_TOOLCHAIN.items()
+            )
+            (build / "CMakeCache.txt").write_text("\n".join(cache), encoding="utf-8")
+            compiler = SimpleNamespace(
+                returncode=0,
+                stdout="Cuda compilation tools, release 12.4\n",
+                stderr="",
+            )
+            with mock.patch.object(artifacts.subprocess, "run", return_value=compiler):
+                record = artifacts.cmake_build_provenance(root)
+            self.assertTrue(record["gate_passed"])
+            self.assertEqual(record["actual_entries"], REQUIRED_CMAKE_TOOLCHAIN)
+
+            wrong = cache.copy()
+            wrong[1] = "CMAKE_CUDA_COMPILER:FILEPATH=/usr/local/cuda-11.6/bin/nvcc"
+            (build / "CMakeCache.txt").write_text("\n".join(wrong), encoding="utf-8")
+            with self.assertRaises(RuntimeError):
+                artifacts.cmake_build_provenance(root)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_official_backend_gate_runs_frozen_matrix(self):
+        root = Path(__file__).parent / f".test-{os.getpid()}-backend-matrix"
+        status = root / "status"
+        build_bin = root / "build" / "bin"
+        try:
+            build_bin.mkdir(parents=True)
+            backend = build_bin / "test-backend-ops"
+            quantize = build_bin / "test-quantize-fns"
+            backend.write_bytes(b"backend")
+            quantize.write_bytes(b"quantize")
+            runtime_binary = root / "runtime-binary"
+            runtime_binary.write_bytes(b"runtime")
+            calls = []
+
+            def fake_case(command, log_path, *, gpu):
+                calls.append((command, gpu))
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.write_text("PASS\n", encoding="utf-8")
+                return {
+                    "command": command,
+                    "physical_gpu": gpu,
+                    "returncode": 0,
+                    "output_bytes": 5,
+                    "passed": True,
+                }
+
+            with mock.patch.object(gates, "STATUS_DIR", status), mock.patch.object(
+                gates, "cmake_build_provenance", return_value={"gate_passed": True}
+            ), mock.patch.object(
+                gates, "_run_logged_backend_case", side_effect=fake_case
+            ), mock.patch.object(
                 gates.subprocess,
                 "run",
                 return_value=SimpleNamespace(
                     returncode=0,
-                    stdout="No tests were found!!!",
+                    stdout=f"{LLAMA_CPP_COMMIT}\n",
                     stderr="",
                 ),
             ), mock.patch.object(
                 gates,
                 "binary_paths",
-                return_value={name: binary for name in ("server", "bench", "quantize", "imatrix", "cli")},
+                return_value={
+                    name: runtime_binary
+                    for name in ("server", "bench", "quantize", "imatrix", "cli")
+                },
+            ):
+                record = gates.run_official_backend_tests(root)
+            self.assertTrue(record["gate_passed"])
+            self.assertEqual(record["executions_passed"], record["executions_required"])
+            self.assertEqual(
+                record["executions_required"],
+                len(BACKEND_TEST_GPUS) * (BACKEND_ADD_STABILITY_REPETITIONS + 1) + 1,
+            )
+            for gpu in BACKEND_TEST_GPUS:
+                self.assertEqual(
+                    sum(
+                        command[-2:] == ["-o", "ADD"] and seen_gpu == gpu
+                        for command, seen_gpu in calls
+                    ),
+                    BACKEND_ADD_STABILITY_REPETITIONS,
+                )
+                self.assertEqual(
+                    sum(
+                        command == [str(backend)] and seen_gpu == gpu
+                        for command, seen_gpu in calls
+                    ),
+                    1,
+                )
+            self.assertEqual(sum(seen_gpu is None for _, seen_gpu in calls), 1)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_backend_case_sanitizes_environment_and_fails_on_timeout(self):
+        root = Path(__file__).parent / f".test-{os.getpid()}-backend-timeout"
+        log = root / "timeout.log"
+        try:
+            def time_out(command, **kwargs):
+                self.assertEqual(kwargs["env"]["CUDA_VISIBLE_DEVICES"], "1")
+                self.assertEqual(kwargs["env"]["CUDA_DEVICE_ORDER"], "PCI_BUS_ID")
+                self.assertNotIn("GGML_CUDA_DISABLE_GRAPHS", kwargs["env"])
+                raise gates.subprocess.TimeoutExpired(
+                    command, kwargs["timeout"], output="partial output\n"
+                )
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "CUDA_VISIBLE_DEVICES": "7",
+                    "GGML_CUDA_DISABLE_GRAPHS": "1",
+                },
+            ), mock.patch.object(gates.subprocess, "run", side_effect=time_out):
+                record = gates._run_logged_backend_case(
+                    ["test-backend-ops"], log, gpu=1
+                )
+            self.assertTrue(record["timed_out"])
+            self.assertFalse(record["passed"])
+            self.assertIn("TIMEOUT", log.read_text(encoding="utf-8"))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_official_backend_gate_rejects_any_failed_execution(self):
+        root = Path(__file__).parent / f".test-{os.getpid()}-backend-failure"
+        status = root / "status"
+        build_bin = root / "build" / "bin"
+        try:
+            build_bin.mkdir(parents=True)
+            for name in ("test-backend-ops", "test-quantize-fns"):
+                (build_bin / name).write_bytes(name.encode())
+            runtime_binary = root / "runtime-binary"
+            runtime_binary.write_bytes(b"runtime")
+            invocation = 0
+
+            def fake_case(command, log_path, *, gpu):
+                nonlocal invocation
+                invocation += 1
+                return {
+                    "command": command,
+                    "physical_gpu": gpu,
+                    "returncode": 1 if invocation == 3 else 0,
+                    "output_bytes": 5,
+                    "passed": invocation != 3,
+                }
+
+            with mock.patch.object(gates, "STATUS_DIR", status), mock.patch.object(
+                gates, "cmake_build_provenance", return_value={"gate_passed": True}
+            ), mock.patch.object(
+                gates, "_run_logged_backend_case", side_effect=fake_case
+            ), mock.patch.object(
+                gates.subprocess,
+                "run",
+                return_value=SimpleNamespace(
+                    returncode=0, stdout=f"{LLAMA_CPP_COMMIT}\n", stderr=""
+                ),
+            ), mock.patch.object(
+                gates,
+                "binary_paths",
+                return_value={
+                    name: runtime_binary
+                    for name in ("server", "bench", "quantize", "imatrix", "cli")
+                },
             ):
                 with self.assertRaises(RuntimeError):
-                    gates.run_official_backend_tests(Path("/tmp/llama.cpp"))
+                    gates.run_official_backend_tests(root)
             record = json.loads(
-                (root / "gates" / "official_backend_tests.json").read_text(
+                (status / "gates" / "official_backend_tests.json").read_text(
                     encoding="utf-8"
                 )
             )
             self.assertFalse(record["gate_passed"])
-            self.assertEqual(record["tests_run"], 0)
+            self.assertEqual(
+                record["executions_passed"], record["executions_required"] - 1
+            )
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

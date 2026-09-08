@@ -57,15 +57,24 @@ Python environment next to (not inside) the llama.cpp checkout for the
 converter, so its requirements cannot downgrade the established `LQ-sgmmp`
 environment or make the pinned checkout appear dirty:
 
-The host must provide CMake, Ninja/Make, `python3-venv`, NVCC, and a C++17
-toolchain with `<charconv>` and AVX2 intrinsics (GCC/G++ 12 is the tested
-target). The bootstrap fails before configuration when these capabilities are
-missing. Compilation defaults to four parallel jobs to fit the 32-GiB server;
+The host must provide CMake, Ninja/Make, `python3-venv`, CUDA Toolkit 12.4 at
+`/usr/local/cuda-12.4`, and GCC/G++ 12. The paths are frozen because an earlier
+CUDA 11.6 diagnostic build showed an intermittent boundary-tolerance failure in
+the pinned backend ADD test before any deployment artifact or task result was
+created. The formal backend gate now runs five consecutive ADD checks and one
+complete backend check on each physical RTX 3090, with CUDA Graphs left at their
+default enabled setting, followed by the quantization-function test. It records
+every attempt and never retries selectively until a pass. Compilation defaults
+to four parallel jobs to fit the 32-GiB server;
 `DEPLOYMENT_BUILD_JOBS` may be raised only after observing adequate free RAM.
 
 ```bash
 cd /data/experiment/LQ/sg-mmp-reproducibility
 export DEPLOYMENT_LLAMA_CPP_DIR=/data/experiment/LQ/llama.cpp-deployment-gguf-v1
+export CC=/usr/bin/gcc-12
+export CXX=/usr/bin/g++-12
+export CUDAHOSTCXX=/usr/bin/g++-12
+export CUDACXX=/usr/local/cuda-12.4/bin/nvcc
 bash experiments/deployment_gguf/bootstrap_llama_cpp.sh \
   2>&1 | tee logs/deployment_gguf_bootstrap.log
 ```

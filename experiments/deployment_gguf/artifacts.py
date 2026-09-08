@@ -26,6 +26,7 @@ from experiments.deployment_gguf.protocol import (
     MODEL_SPECS,
     OUT,
     PROTOCOL_VERSION,
+    REQUIRED_CMAKE_TOOLCHAIN,
     artifact_path,
     atomic_write_json,
     binary_paths,
@@ -101,6 +102,53 @@ def _binary_provenance(binaries: dict[str, Path]) -> dict:
     return records
 
 
+def cmake_build_provenance(root: Path) -> dict:
+    """Require the pre-test CUDA 12.4/G++ 12 build and record its evidence."""
+    cache_path = root / "build" / "CMakeCache.txt"
+    if not cache_path.is_file():
+        raise FileNotFoundError(f"Missing CMake build provenance: {cache_path}")
+    cache_text = cache_path.read_text(encoding="utf-8", errors="replace")
+    entries = {
+        match.group(1): match.group(2).strip()
+        for match in re.finditer(
+            r"^([^#/:=]+)(?::[^=]+)?=(.*)$", cache_text, flags=re.MULTILINE
+        )
+    }
+    source = entries.get("CMAKE_HOME_DIRECTORY")
+    if not source or Path(source).resolve() != root.resolve():
+        raise RuntimeError(
+            f"CMake build directory is not bound to pinned checkout: {root}"
+        )
+    actual = {key: entries.get(key) for key in REQUIRED_CMAKE_TOOLCHAIN}
+    if actual != REQUIRED_CMAKE_TOOLCHAIN:
+        raise RuntimeError(
+            "CMake toolchain does not match the frozen deployment toolchain: "
+            f"expected {REQUIRED_CMAKE_TOOLCHAIN}, found {actual}"
+        )
+    version_outputs = {}
+    for path in sorted(set(REQUIRED_CMAKE_TOOLCHAIN.values())):
+        result = subprocess.run(
+            [path, "--version"], capture_output=True, text=True, timeout=30
+        )
+        if result.returncode:
+            raise RuntimeError(f"Cannot identify frozen compiler {path}")
+        version_outputs[path] = (result.stdout + result.stderr).strip()
+    nvcc_output = version_outputs[
+        REQUIRED_CMAKE_TOOLCHAIN["CMAKE_CUDA_COMPILER"]
+    ]
+    if "release 12.4" not in nvcc_output:
+        raise RuntimeError("Frozen nvcc path does not report CUDA 12.4")
+    return {
+        "cache_path": str(cache_path),
+        "cache_sha256": sha256_file(cache_path),
+        "source_directory": str(root.resolve()),
+        "required_entries": dict(REQUIRED_CMAKE_TOOLCHAIN),
+        "actual_entries": actual,
+        "compiler_version_outputs": version_outputs,
+        "gate_passed": True,
+    }
+
+
 def require_llama_cpp(
     llama_cpp_dir: Path, *, minimum_free_disk_gib: float | None = None
 ) -> dict:
@@ -130,15 +178,7 @@ def require_llama_cpp(
     missing = [str(path) for path in binaries.values() if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"Missing pinned llama.cpp binaries: {missing}")
-    cache_path = root / "build" / "CMakeCache.txt"
-    if not cache_path.is_file():
-        raise FileNotFoundError(f"Missing CMake build provenance: {cache_path}")
-    cache_text = cache_path.read_text(encoding="utf-8", errors="replace")
-    source_match = re.search(r"^CMAKE_HOME_DIRECTORY:INTERNAL=(.+)$", cache_text, re.M)
-    if not source_match or Path(source_match.group(1)).resolve() != root:
-        raise RuntimeError(
-            f"CMake build directory is not bound to pinned checkout: {root}"
-        )
+    cmake_provenance = cmake_build_provenance(root)
     binary_versions = _binary_provenance(binaries)
     converter = root / "convert_hf_to_gguf.py"
     if not converter.is_file():
@@ -217,8 +257,9 @@ def require_llama_cpp(
         "dirty": False,
         "binaries": {key: str(path) for key, path in binaries.items()},
         "binary_versions": binary_versions,
-        "cmake_cache_sha256": sha256_file(cache_path),
-        "cmake_source_directory": str(root),
+        "cmake_cache_sha256": cmake_provenance["cache_sha256"],
+        "cmake_source_directory": cmake_provenance["source_directory"],
+        "cmake_build_provenance": cmake_provenance,
         "conversion_python": str(conversion_python),
         "conversion_packages": sorted(
             line.strip() for line in freeze_result.stdout.splitlines() if line.strip()

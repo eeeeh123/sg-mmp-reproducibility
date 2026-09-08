@@ -5,13 +5,19 @@ from __future__ import annotations
 import gc
 import hashlib
 import json
+import os
 import re
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
+from experiments.deployment_gguf.artifacts import cmake_build_provenance
 from experiments.deployment_gguf.llama_server import LlamaServer
 from experiments.deployment_gguf.protocol import (
     LLAMA_CPP_COMMIT,
+    BACKEND_ADD_STABILITY_REPETITIONS,
+    BACKEND_TEST_GPUS,
+    BACKEND_TEST_TIMEOUT_SECONDS,
     MODEL_SPECS,
     PROTOCOL_VERSION,
     STATUS_DIR,
@@ -269,6 +275,65 @@ def conversion_gate(model_key: str, llama_cpp_dir: Path, *, gpu: int) -> dict:
     return record
 
 
+def _run_logged_backend_case(
+    command: list[str], log_path: Path, *, gpu: int | None
+) -> dict:
+    env = os.environ.copy()
+    env.pop("GGML_CUDA_DISABLE_GRAPHS", None)
+    env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    if gpu is not None:
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    else:
+        env.pop("CUDA_VISIBLE_DEVICES", None)
+    timed_out = False
+    try:
+        result = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=BACKEND_TEST_TIMEOUT_SECONDS,
+        )
+        returncode = result.returncode
+        output = result.stdout + result.stderr
+    except subprocess.TimeoutExpired as exc:
+        timed_out = True
+        returncode = None
+        stdout = (
+            exc.stdout.decode(errors="replace")
+            if isinstance(exc.stdout, bytes)
+            else (exc.stdout or "")
+        )
+        stderr = (
+            exc.stderr.decode(errors="replace")
+            if isinstance(exc.stderr, bytes)
+            else (exc.stderr or "")
+        )
+        output = stdout + stderr + "\nTIMEOUT\n"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(output, encoding="utf-8")
+    failure_marker = re.search(r"(?:^|\s)FAIL(?:\s|$)|compare failed", output)
+    return {
+        "command": command,
+        "physical_gpu": gpu,
+        "cuda_visible_devices": str(gpu) if gpu is not None else None,
+        "cuda_device_order": "PCI_BUS_ID",
+        "cuda_graph_disable_variable": "unset",
+        "returncode": returncode,
+        "timeout_seconds": BACKEND_TEST_TIMEOUT_SECONDS,
+        "timed_out": timed_out,
+        "output_bytes": len(output.encode("utf-8")),
+        "log_path": str(log_path),
+        "log_sha256": sha256_file(log_path),
+        "failure_marker_found": failure_marker is not None,
+        "passed": (
+            returncode == 0
+            and bool(output.strip())
+            and failure_marker is None
+        ),
+    }
+
+
 def run_official_backend_tests(llama_cpp_dir: Path) -> dict:
     root = llama_cpp_dir.resolve()
     build_dir = root / "build"
@@ -278,41 +343,79 @@ def run_official_backend_tests(llama_cpp_dir: Path) -> dict:
         capture_output=True,
     )
     commit = commit_result.stdout.strip()
+    cmake_provenance = cmake_build_provenance(root)
     binaries = binary_paths(root)
-    command = [
-        "ctest",
-        "--test-dir",
-        str(build_dir),
-        "-R",
-        "test-quantize-fns|test-backend-ops",
-        "--output-on-failure",
+    backend_binary = build_dir / "bin" / "test-backend-ops"
+    quantize_binary = build_dir / "bin" / "test-quantize-fns"
+    missing = [
+        str(path)
+        for path in (backend_binary, quantize_binary)
+        if not path.is_file()
     ]
-    result = subprocess.run(command, text=True, capture_output=True)
-    combined = f"{result.stdout}\n{result.stderr}"
-    total_match = re.search(r"out of\s+(\d+)", combined, flags=re.IGNORECASE)
-    tests_run = int(total_match.group(1)) if total_match else 0
+    if missing:
+        raise FileNotFoundError(f"Missing pinned backend test binaries: {missing}")
+
+    attempt_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    log_dir = STATUS_DIR / "gate_logs" / "official_backend_tests" / attempt_id
+    add_stability = []
+    for gpu in BACKEND_TEST_GPUS:
+        for repetition in range(1, BACKEND_ADD_STABILITY_REPETITIONS + 1):
+            add_stability.append(
+                _run_logged_backend_case(
+                    [str(backend_binary), "-o", "ADD"],
+                    log_dir / f"add__gpu{gpu}__rep{repetition}.log",
+                    gpu=gpu,
+                )
+            )
+    full_backend = [
+        _run_logged_backend_case(
+            [str(backend_binary)],
+            log_dir / f"full_backend__gpu{gpu}.log",
+            gpu=gpu,
+        )
+        for gpu in BACKEND_TEST_GPUS
+    ]
+    quantize = _run_logged_backend_case(
+        [str(quantize_binary)], log_dir / "quantize_fns.log", gpu=None
+    )
+    executions = [*add_stability, *full_backend, quantize]
     passed = (
-        result.returncode == 0
-        and tests_run > 0
-        and "No tests were found" not in combined
-        and "100% tests passed" in combined
-        and commit_result.returncode == 0
+        commit_result.returncode == 0
         and commit == LLAMA_CPP_COMMIT
+        and len(add_stability)
+        == len(BACKEND_TEST_GPUS) * BACKEND_ADD_STABILITY_REPETITIONS
+        and len(full_backend) == len(BACKEND_TEST_GPUS)
+        and all(item["passed"] for item in executions)
     )
     record = {
         "protocol_version": PROTOCOL_VERSION,
-        "command": command,
-        "returncode": result.returncode,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
-        "tests_run": tests_run,
+        "attempt_id": attempt_id,
         "llama_cpp_commit": commit,
+        "cmake_build_provenance": cmake_provenance,
+        "required_physical_gpus": list(BACKEND_TEST_GPUS),
+        "add_stability_repetitions_per_gpu": BACKEND_ADD_STABILITY_REPETITIONS,
+        "cuda_graph_disable_variable": "unset for every execution",
+        "add_stability": add_stability,
+        "full_backend": full_backend,
+        "quantize_fns": quantize,
+        "executions_required": len(BACKEND_TEST_GPUS)
+        * (BACKEND_ADD_STABILITY_REPETITIONS + 1)
+        + 1,
+        "executions_passed": sum(item["passed"] for item in executions),
         "binary_sha256": {
             name: sha256_file(path) for name, path in binaries.items()
+        },
+        "test_binary_sha256": {
+            "backend_ops": sha256_file(backend_binary),
+            "quantize_fns": sha256_file(quantize_binary),
         },
         "gate_passed": passed,
     }
     path = STATUS_DIR / "gates" / "official_backend_tests.json"
+    attempt_path = (
+        STATUS_DIR / "gates" / "official_backend_test_attempts" / f"{attempt_id}.json"
+    )
+    atomic_write_json(attempt_path, record)
     atomic_write_json(path, record)
     if not passed:
         raise RuntimeError(f"Pinned llama.cpp backend tests failed; inspect {path}")

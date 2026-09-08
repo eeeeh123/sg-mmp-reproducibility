@@ -24,6 +24,14 @@ HERE = Path(__file__).resolve().parent
 LOCK_PATH = HERE / "protocol_lock.json"
 PROTOCOL_VERSION = "deployment-gguf-v1"
 LLAMA_CPP_COMMIT = "050dde50c9d70cf207db84f7224eedc491d817b2"
+REQUIRED_CMAKE_TOOLCHAIN = {
+    "CMAKE_CUDA_COMPILER": "/usr/local/cuda-12.4/bin/nvcc",
+    "CMAKE_CXX_COMPILER": "/usr/bin/g++-12",
+    "CUDAToolkit_NVCC_EXECUTABLE": "/usr/local/cuda-12.4/bin/nvcc",
+}
+BACKEND_TEST_GPUS = (0, 1)
+BACKEND_ADD_STABILITY_REPETITIONS = 5
+BACKEND_TEST_TIMEOUT_SECONDS = 900
 METHODS = ("fp16", "q4", "q5", "sg")
 QUANTIZED_METHODS = ("q4", "q5", "sg")
 PHASE_MODELS = {
@@ -65,6 +73,8 @@ def protocol_lock() -> dict:
         raise RuntimeError(f"Protocol lock mismatch: {LOCK_PATH}")
     if value.get("llama_cpp", {}).get("commit") != LLAMA_CPP_COMMIT:
         raise RuntimeError("Pinned llama.cpp commit disagrees with code")
+    if value.get("llama_cpp", {}).get("cmake_toolchain") != REQUIRED_CMAKE_TOOLCHAIN:
+        raise RuntimeError("Pinned llama.cpp toolchain disagrees with code")
     return value
 
 

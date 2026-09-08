@@ -5,6 +5,19 @@ LLAMA_CPP_COMMIT=050dde50c9d70cf207db84f7224eedc491d817b2
 LLAMA_CPP_DIR="${DEPLOYMENT_LLAMA_CPP_DIR:-/data/experiment/LQ/llama.cpp-deployment-gguf-v1}"
 CONVERT_VENV="${DEPLOYMENT_LLAMA_CPP_CONVERT_VENV:-${LLAMA_CPP_DIR}-convert-venv}"
 BUILD_JOBS="${DEPLOYMENT_BUILD_JOBS:-4}"
+REQUIRED_CC=/usr/bin/gcc-12
+REQUIRED_CXX=/usr/bin/g++-12
+REQUIRED_NVCC=/usr/local/cuda-12.4/bin/nvcc
+
+if [[ "${CC:-}" != "$REQUIRED_CC" || "${CXX:-}" != "$REQUIRED_CXX" || \
+      "${CUDAHOSTCXX:-}" != "$REQUIRED_CXX" || "${CUDACXX:-}" != "$REQUIRED_NVCC" ]]; then
+  echo "Frozen build requires:" >&2
+  echo "  CC=$REQUIRED_CC" >&2
+  echo "  CXX=$REQUIRED_CXX" >&2
+  echo "  CUDAHOSTCXX=$REQUIRED_CXX" >&2
+  echo "  CUDACXX=$REQUIRED_NVCC" >&2
+  exit 1
+fi
 
 for tool in git cmake python3 "${CC:-cc}" "${CXX:-c++}" "${CUDACXX:-nvcc}"; do
   if ! command -v "$tool" >/dev/null 2>&1; then
@@ -50,6 +63,10 @@ cmake -S "$LLAMA_CPP_DIR" -B "$LLAMA_CPP_DIR/build" \
   -DGGML_CUDA=ON \
   -DLLAMA_CURL=OFF \
   -DLLAMA_BUILD_TESTS=ON \
+  -DCMAKE_C_COMPILER="$REQUIRED_CC" \
+  -DCMAKE_CXX_COMPILER="$REQUIRED_CXX" \
+  -DCMAKE_CUDA_COMPILER="$REQUIRED_NVCC" \
+  -DCMAKE_CUDA_HOST_COMPILER="$REQUIRED_CXX" \
   -DCMAKE_BUILD_TYPE=Release
 cmake --build "$LLAMA_CPP_DIR/build" --config Release -j "$BUILD_JOBS"
 
