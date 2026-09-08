@@ -309,6 +309,35 @@ class ProtocolTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_backend_gate_archives_legacy_latest_before_replacement(self):
+        root = Path(__file__).parent / f".test-{os.getpid()}-backend-archive"
+        latest = root / "gates" / "official_backend_tests.json"
+        previous = {"gate_passed": False, "returncode": 1, "legacy": True}
+        try:
+            latest.parent.mkdir(parents=True)
+            latest.write_text(json.dumps(previous), encoding="utf-8")
+            gates._archive_previous_backend_gate(latest)
+            archives = list(
+                (latest.parent / "official_backend_test_attempts").glob("*.json")
+            )
+            self.assertEqual(len(archives), 1)
+            self.assertEqual(
+                json.loads(archives[0].read_text(encoding="utf-8")), previous
+            )
+            gates._archive_previous_backend_gate(latest)
+            self.assertEqual(
+                len(
+                    list(
+                        (latest.parent / "official_backend_test_attempts").glob(
+                            "*.json"
+                        )
+                    )
+                ),
+                1,
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_official_backend_gate_rejects_any_failed_execution(self):
         root = Path(__file__).parent / f".test-{os.getpid()}-backend-failure"
         status = root / "status"

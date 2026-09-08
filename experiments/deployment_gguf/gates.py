@@ -334,9 +334,28 @@ def _run_logged_backend_case(
     }
 
 
+def _archive_previous_backend_gate(path: Path) -> None:
+    if not path.is_file():
+        return
+    previous = json.loads(path.read_text(encoding="utf-8"))
+    attempt_id = previous.get("attempt_id")
+    if not isinstance(attempt_id, str) or not re.fullmatch(
+        r"\d{8}T\d{12}Z", attempt_id
+    ):
+        attempt_id = f"legacy__{sha256_file(path)[:16]}"
+    archive = path.parent / "official_backend_test_attempts" / f"{attempt_id}.json"
+    if archive.is_file():
+        if json.loads(archive.read_text(encoding="utf-8")) != previous:
+            raise RuntimeError(f"Backend gate history collision: {archive}")
+        return
+    atomic_write_json(archive, previous)
+
+
 def run_official_backend_tests(llama_cpp_dir: Path) -> dict:
     root = llama_cpp_dir.resolve()
     build_dir = root / "build"
+    path = STATUS_DIR / "gates" / "official_backend_tests.json"
+    _archive_previous_backend_gate(path)
     commit_result = subprocess.run(
         ["git", "-C", str(root), "rev-parse", "HEAD"],
         text=True,
@@ -411,7 +430,6 @@ def run_official_backend_tests(llama_cpp_dir: Path) -> dict:
         },
         "gate_passed": passed,
     }
-    path = STATUS_DIR / "gates" / "official_backend_tests.json"
     attempt_path = (
         STATUS_DIR / "gates" / "official_backend_test_attempts" / f"{attempt_id}.json"
     )
