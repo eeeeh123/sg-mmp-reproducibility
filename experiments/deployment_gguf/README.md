@@ -57,6 +57,12 @@ Python environment next to (not inside) the llama.cpp checkout for the
 converter, so its requirements cannot downgrade the established `LQ-sgmmp`
 environment or make the pinned checkout appear dirty:
 
+The host must provide CMake, Ninja/Make, `python3-venv`, NVCC, and a C++17
+toolchain with `<charconv>` and AVX2 intrinsics (GCC/G++ 12 is the tested
+target). The bootstrap fails before configuration when these capabilities are
+missing. Compilation defaults to four parallel jobs to fit the 32-GiB server;
+`DEPLOYMENT_BUILD_JOBS` may be raised only after observing adequate free RAM.
+
 ```bash
 cd /data/experiment/LQ/sg-mmp-reproducibility
 export DEPLOYMENT_LLAMA_CPP_DIR=/data/experiment/LQ/llama.cpp-deployment-gguf-v1
