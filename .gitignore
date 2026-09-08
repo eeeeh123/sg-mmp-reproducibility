@@ -3,6 +3,7 @@
 /results/
 /figures/
 /experiments/revision_full/outputs/
+/experiments/deployment_gguf/outputs/
 /server_plans/
 server_all.sh
 server_all.log

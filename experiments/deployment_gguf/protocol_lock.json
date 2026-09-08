@@ -1,0 +1,155 @@
+{
+  "schema_version": 1,
+  "protocol_version": "deployment-gguf-v1",
+  "frozen_on": "2026-09-08",
+  "research_question": "On one common GGUF/CUDA backend, does the frozen SG-MMP precision allocation provide a useful accuracy-memory-speed trade-off?",
+  "inference_scope": "Deployment transferability of the frozen allocation policy; not deployment validation of the original GPTQ implementation.",
+  "llama_cpp": {
+    "repository": "https://github.com/ggml-org/llama.cpp.git",
+    "commit": "050dde50c9d70cf207db84f7224eedc491d817b2"
+  },
+  "source_weights": "Each artifact is independently quantized from the immutable high-precision checkpoint recorded by revision-full-v4; requantization is forbidden.",
+  "models": {
+    "qwen05": {"phase": "engineering", "role": "engineering gate only"},
+    "qwen15": {"phase": "value", "role": "precommitted value pilot"},
+    "smollm": {"phase": "value", "role": "precommitted value pilot"},
+    "gemma2": {"phase": "formal", "role": "architecture-family extension"}
+  },
+  "methods": {
+    "fp16": {
+      "label": "GGUF-FP16",
+      "quantizer": "conversion only",
+      "base_type": "F16"
+    },
+    "q4": {
+      "label": "Q4_K-pure",
+      "quantizer": "llama-quantize --pure",
+      "base_type": "Q4_K",
+      "token_embedding_type": "F16",
+      "output_tensor_type": "F16"
+    },
+    "q5": {
+      "label": "Q5_K-pure",
+      "quantizer": "llama-quantize --pure",
+      "base_type": "Q5_K",
+      "token_embedding_type": "F16",
+      "output_tensor_type": "F16"
+    },
+    "sg": {
+      "label": "SG allocation-GGUF",
+      "quantizer": "llama-quantize --pure with exact frozen-module Q8_0 overrides",
+      "base_type": "Q4_K",
+      "selected_type": "Q8_0",
+      "token_embedding_type": "F16",
+      "output_tensor_type": "F16",
+      "selection_source": "revision-full-v4 train-only frozen selection"
+    }
+  },
+  "importance_matrix": {
+    "source": "Round-trip-exact decoded union, in seed order 41/97/193, of the existing frozen WikiText-train packed calibration streams; independent sequences are separated by one model EOS token parsed as special",
+    "calibration_seeds": [41, 97, 193],
+    "samples_per_seed": 128,
+    "tokens_per_sample": 2048,
+    "sequence_boundary": "one model EOS token; 383 boundaries for 384 frozen sequences",
+    "shared_across_methods_within_model": true,
+    "test_data_used": false
+  },
+  "tensor_policy": {
+    "eligible_hf_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+    "embedding": "F16",
+    "output_head": "F16 when stored; an absent tied output is recorded, not duplicated",
+    "normalization_and_other_noneligible_tensors": "unchanged conversion/default treatment, audited per artifact",
+    "mapping_requirement": "Every eligible HF module maps exactly once to GGUF and has the prescribed type; missing, duplicate, shape/parameter, or type mismatches hard fail.",
+    "budget_policy": "Do not retune the frozen SG selection to match Q5 bytes. Report original logical bpw, packed eligible bpw, whole-artifact bpw, and exact bytes separately."
+  },
+  "generation": {
+    "quality": {
+      "dataset": "complete official GSM8K test set in dataset order",
+      "n": 1319,
+      "prompt": "original revision-full-v4 5-shot prompt",
+      "sampling": "greedy",
+      "max_new_tokens": 256,
+      "online_stop": false,
+      "primary_extraction": "flexible",
+      "sensitivity": ["strict #### extraction", "delimiter coverage", "offline subsequent-Question truncation audit"]
+    },
+    "performance": {
+      "generated_tokens": 128,
+      "decode_context_depths": [128, 512, 1024, "train-derived five-shot median"],
+      "ignore_eos": true,
+      "quality_interpretation_forbidden": true
+    }
+  },
+  "performance": {
+    "backend": "one pinned llama.cpp CUDA build for every method",
+    "microbenchmark": {
+      "tool": "llama-bench",
+      "prompt_tokens": [128, 512, 1024, "train-derived five-shot median"],
+      "generated_tokens": 128,
+      "labels": ["prompt processing", "text generation"],
+      "excludes": ["tokenization", "sampling", "request scheduling"]
+    },
+    "request_benchmark": {
+      "tool": "llama-server native streaming /completion",
+      "concurrency": [1, 4],
+      "metrics": ["TTFT", "inter-token latency", "request latency", "aggregate throughput"]
+    },
+    "fixed_controls": {
+      "kv_type": "F16",
+      "gpu_offload": "all layers",
+      "flash_attention": "on",
+      "cache_prompt": false,
+      "cpu_threads": 8,
+      "batch_size": 512,
+      "microbatch_size": 512,
+      "continuous_batching": true,
+      "context_tokens_per_server_slot": 4096,
+      "load_mode": "none",
+      "lazy_mode": "off",
+      "weight_repacking": "enabled",
+      "timing_gpu": "one otherwise-idle RTX 3090",
+      "maximum_prelaunch_used_gpu_memory_mib": 1024,
+      "quality_gpu": "the other RTX 3090; no simultaneous timing workload"
+    },
+    "pilot_process_blocks": 5,
+    "pilot_repetitions_within_block": 5,
+    "formal_min_process_blocks": 10,
+    "formal_max_process_blocks": 30,
+    "formal_precision_target": "For SG/Q4 and SG/Q5 native-service aggregate-throughput ratios at concurrency 1 and 4, require 95% paired process-block bootstrap ratio CI half-width <= 2%; add paired blocks 10->20->30, then stop and report even if unmet."
+  },
+  "gates": {
+    "conversion": {
+      "data": "eight fixed GSM8K-train prompts at indices 5..12; test is never loaded",
+      "tokenizer": "8/8 prompt token-ID arrays exactly match Hugging Face with add_special_tokens=false",
+      "chat_template": "for chat models, 8/8 rendered prompt strings and token arrays are recorded and must pass the tokenizer rule",
+      "continuation": "HF-FP16 versus GGUF-FP16: 8/8 first generated tokens and at least 126/128 aligned greedy continuation tokens match",
+      "logit_derived_check": "On every train prompt, HF-FP16 and GGUF-FP16 first-token top-8 raw-softmax log-probabilities overlap on at least 7 token IDs and differ by at most 0.05 absolute log-probability on every common ID.",
+      "thresholds_frozen_before_test": true
+    },
+    "packed_backend": {
+      "official_tests": "the pinned build's quantization/backend test command exits zero",
+      "data": "the same eight fixed GSM8K-train prompts; test is never loaded",
+      "continuation": "CPU versus CUDA for every packed artifact: 8/8 first generated tokens and at least 126/128 aligned greedy continuation tokens match",
+      "thresholds_frozen_before_test": true
+    },
+    "artifact": "Every tensor mapping/type/size audit passes and provenance hashes are complete.",
+    "stage_progression": "Engineering qwen05 is technical only. Value qwen15+smollm is precommitted. Within every test-bearing stage, every model must finish artifact construction, gates, and performance blocks before any GSM8K test row is loaded. Formal expansion requires passed gates, <=24 estimated GPU-hours, and <=40 GiB estimated additional storage."
+  },
+  "statistics": {
+    "unit_for_performance_inference": "independent process block",
+    "within_process_repetitions": "summarized within block; never treated as independent replicates",
+    "comparison": "paired by process block; report the geometric mean of within-block method ratios with deterministic paired bootstrap confidence intervals",
+    "accuracy": "paired item-level effects and intervals within each newly measured backend artifact",
+    "report_all_pilot_results": true
+  },
+  "claim_policy": {
+    "allowed": "Allocation-policy transfer on this pinned GGUF/CUDA stack, with measured accuracy, storage, memory, and speed.",
+    "forbidden": [
+      "Calling the new artifacts original GPTQ-W4/W5 or original SG-MMP weights",
+      "Claiming Q5 is slow merely because INT5 is not a native Tensor Core type",
+      "Using llama-bench as end-to-end TTFT or service throughput",
+      "Mixing original logical bit budget with packed file bits-per-weight",
+      "Enabling the revision-full deployment claim from this extension"
+    ]
+  }
+}
