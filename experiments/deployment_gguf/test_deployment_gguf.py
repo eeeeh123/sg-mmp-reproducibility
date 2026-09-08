@@ -24,8 +24,6 @@ from experiments.deployment_gguf.make_server_plan import (
     build_plan,
 )
 from experiments.deployment_gguf.protocol import (
-    BACKEND_ADD_STABILITY_REPETITIONS,
-    BACKEND_TEST_GPUS,
     LLAMA_CPP_COMMIT,
     REQUIRED_CMAKE_TOOLCHAIN,
     protocol_lock,
@@ -209,15 +207,13 @@ class ProtocolTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_official_backend_gate_runs_frozen_matrix(self):
-        root = Path(__file__).parent / f".test-{os.getpid()}-backend-matrix"
+    def test_backend_gate_runs_only_strict_quantize_self_test(self):
+        root = Path(__file__).parent / f".test-{os.getpid()}-backend-quantize"
         status = root / "status"
         build_bin = root / "build" / "bin"
         try:
             build_bin.mkdir(parents=True)
-            backend = build_bin / "test-backend-ops"
             quantize = build_bin / "test-quantize-fns"
-            backend.write_bytes(b"backend")
             quantize.write_bytes(b"quantize")
             runtime_binary = root / "runtime-binary"
             runtime_binary.write_bytes(b"runtime")
@@ -233,8 +229,6 @@ class ProtocolTests(unittest.TestCase):
                     "returncode": 0,
                     "output_bytes": 5,
                     "passed": True,
-                    "known_stochastic_add_boundary": {"accepted": False},
-                    "gate_accepted": True,
                 }
 
             with mock.patch.object(gates, "STATUS_DIR", status), mock.patch.object(
@@ -259,29 +253,10 @@ class ProtocolTests(unittest.TestCase):
             ):
                 record = gates.run_official_backend_tests(root)
             self.assertTrue(record["gate_passed"])
-            self.assertEqual(record["executions_passed"], record["executions_required"])
-            self.assertEqual(record["executions_gate_accepted"], record["executions_required"])
-            self.assertEqual(record["executions_accepted_known_stochastic_boundary"], 0)
-            self.assertEqual(
-                record["executions_required"],
-                len(BACKEND_TEST_GPUS) * (BACKEND_ADD_STABILITY_REPETITIONS + 1) + 1,
-            )
-            for gpu in BACKEND_TEST_GPUS:
-                self.assertEqual(
-                    sum(
-                        command[-2:] == ["-o", "ADD"] and seen_gpu == gpu
-                        for command, seen_gpu in calls
-                    ),
-                    BACKEND_ADD_STABILITY_REPETITIONS,
-                )
-                self.assertEqual(
-                    sum(
-                        command == [str(backend)] and seen_gpu == gpu
-                        for command, seen_gpu in calls
-                    ),
-                    1,
-                )
-            self.assertEqual(sum(seen_gpu is None for _, seen_gpu in calls), 1)
+            self.assertEqual(record["strict_checks_required"], 1)
+            self.assertEqual(record["strict_checks_passed"], 1)
+            self.assertFalse(record["generic_backend_ops"]["executed"])
+            self.assertEqual(calls, [([str(quantize)], None)])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -309,59 +284,7 @@ class ProtocolTests(unittest.TestCase):
                 )
             self.assertTrue(record["timed_out"])
             self.assertFalse(record["passed"])
-            self.assertFalse(record["gate_accepted"])
             self.assertIn("TIMEOUT", log.read_text(encoding="utf-8"))
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-
-    def test_known_stochastic_add_boundary_is_narrowly_classified(self):
-        signature = gates.KNOWN_STOCHASTIC_ADD_SIGNATURE
-        output = (
-            "[ADD] ERR = 0.000000101 > 0.000000100   "
-            f"{signature}: FAIL\n"
-            "100/101 tests passed\n\n"
-            "Failing tests:\n"
-            f"  {signature}\n"
-            "Backend CUDA0: FAIL\n"
-        )
-        accepted = gates._classify_known_stochastic_add_boundary(
-            output, returncode=1, timed_out=False
-        )
-        self.assertTrue(accepted["accepted"])
-        self.assertAlmostEqual(accepted["observed_nmse"], 1.01e-7)
-        self.assertAlmostEqual(accepted["reported_threshold"], 1e-7)
-
-        for rejected_output in (
-            output.replace("0.000000101", "0.000000201", 1),
-            output.replace("nf=2", "nf=3"),
-            output + "compare failed\n",
-        ):
-            rejected = gates._classify_known_stochastic_add_boundary(
-                rejected_output, returncode=1, timed_out=False
-            )
-            self.assertFalse(rejected["accepted"])
-
-    def test_known_boundary_is_gate_accepted_but_not_a_strict_pass(self):
-        root = Path(__file__).parent / f".test-{os.getpid()}-backend-boundary"
-        log = root / "boundary.log"
-        signature = gates.KNOWN_STOCHASTIC_ADD_SIGNATURE
-        output = (
-            "[ADD] ERR = 0.000000101 > 0.000000100   "
-            f"{signature}: FAIL\n"
-            "100/101 tests passed\n\n"
-            "Failing tests:\n"
-            f"  {signature}\n"
-            "Backend CUDA0: FAIL\n"
-        )
-        try:
-            result = SimpleNamespace(returncode=1, stdout=output, stderr="")
-            with mock.patch.object(gates.subprocess, "run", return_value=result):
-                record = gates._run_logged_backend_case(
-                    ["test-backend-ops", "-o", "ADD"], log, gpu=1
-                )
-            self.assertFalse(record["passed"])
-            self.assertTrue(record["known_stochastic_add_boundary"]["accepted"])
-            self.assertTrue(record["gate_accepted"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -394,30 +317,22 @@ class ProtocolTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_official_backend_gate_rejects_any_failed_execution(self):
+    def test_backend_gate_rejects_failed_quantize_self_test(self):
         root = Path(__file__).parent / f".test-{os.getpid()}-backend-failure"
         status = root / "status"
         build_bin = root / "build" / "bin"
         try:
             build_bin.mkdir(parents=True)
-            for name in ("test-backend-ops", "test-quantize-fns"):
-                (build_bin / name).write_bytes(name.encode())
+            (build_bin / "test-quantize-fns").write_bytes(b"quantize")
             runtime_binary = root / "runtime-binary"
             runtime_binary.write_bytes(b"runtime")
-            invocation = 0
-
             def fake_case(command, log_path, *, gpu):
-                nonlocal invocation
-                invocation += 1
-                accepted = invocation != 3
                 return {
                     "command": command,
                     "physical_gpu": gpu,
-                    "returncode": 1 if invocation == 3 else 0,
+                    "returncode": 1,
                     "output_bytes": 5,
-                    "passed": accepted,
-                    "known_stochastic_add_boundary": {"accepted": False},
-                    "gate_accepted": accepted,
+                    "passed": False,
                 }
 
             with mock.patch.object(gates, "STATUS_DIR", status), mock.patch.object(
@@ -446,13 +361,8 @@ class ProtocolTests(unittest.TestCase):
                 )
             )
             self.assertFalse(record["gate_passed"])
-            self.assertEqual(
-                record["executions_passed"], record["executions_required"] - 1
-            )
-            self.assertEqual(
-                record["executions_gate_accepted"], record["executions_required"] - 1
-            )
-            self.assertEqual(record["executions_accepted_known_stochastic_boundary"], 0)
+            self.assertEqual(record["strict_checks_required"], 1)
+            self.assertEqual(record["strict_checks_passed"], 0)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
