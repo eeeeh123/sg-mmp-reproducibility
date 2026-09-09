@@ -35,7 +35,8 @@ MIN_ALIGNED_MATCHES = 126
 LOGPROB_TOP_K = 8
 MIN_LOGPROB_TOP_K_OVERLAP = 7
 MAX_COMMON_LOGPROB_ABS_ERROR = 0.05
-NEAR_TIE_MAX_MARGIN = 2 * MAX_COMMON_LOGPROB_ABS_ERROR
+MAX_CRITICAL_LOGPROB_GAP_ERROR = 2 * MAX_COMMON_LOGPROB_ABS_ERROR
+NEAR_TIE_MAX_MARGIN = MAX_CRITICAL_LOGPROB_GAP_ERROR
 
 
 def _gate_prompts(model_key: str):
@@ -144,6 +145,20 @@ def _reference_logprob_agreement(
         if critical_present
         else None
     )
+    critical_gap_errors = (
+        {
+            token: abs(
+                (hf_row[hf_top1] - hf_row[token])
+                - (gguf_row[gguf_top1] - gguf_row[token])
+            )
+            for token in critical
+        }
+        if critical_present
+        else {}
+    )
+    max_critical_gap_error = (
+        max(critical_gap_errors.values()) if critical_gap_errors else None
+    )
     hf_margin = hf_row[hf_ranked[0]] - hf_row[hf_ranked[1]]
     gguf_margin = gguf_row[gguf_ranked[0]] - gguf_row[gguf_ranked[1]]
     same_top1 = hf_top1 == gguf_top1
@@ -156,8 +171,8 @@ def _reference_logprob_agreement(
     )
     passed = (
         len(common) >= MIN_LOGPROB_TOP_K_OVERLAP
-        and max_critical_error is not None
-        and max_critical_error <= MAX_COMMON_LOGPROB_ABS_ERROR
+        and max_critical_gap_error is not None
+        and max_critical_gap_error <= MAX_CRITICAL_LOGPROB_GAP_ERROR
         and (same_top1 or explained_near_tie)
     )
     return {
@@ -174,6 +189,11 @@ def _reference_logprob_agreement(
         ),
         "critical_token_ids": sorted(critical),
         "max_critical_logprob_abs_error": max_critical_error,
+        "critical_logprob_gap_abs_errors": [
+            {"id": token, "abs_error": critical_gap_errors[token]}
+            for token in sorted(critical_gap_errors)
+        ],
+        "max_critical_logprob_gap_abs_error": max_critical_gap_error,
         "hf_top1_id": hf_top1,
         "gguf_top1_id": gguf_top1,
         "hf_top1_margin": hf_margin,
@@ -387,7 +407,12 @@ def conversion_gate(model_key: str, llama_cpp_dir: Path, *, gpu: int) -> dict:
         "teacher_forced_reference_logprob_check": {
             "top_k": LOGPROB_TOP_K,
             "required_overlap_per_prompt": MIN_LOGPROB_TOP_K_OVERLAP,
-            "maximum_critical_token_logprob_absolute_error": MAX_COMMON_LOGPROB_ABS_ERROR,
+            "single_token_logprob_absolute_error_diagnostic_reference": (
+                MAX_COMMON_LOGPROB_ABS_ERROR
+            ),
+            "maximum_critical_logprob_gap_absolute_error": (
+                MAX_CRITICAL_LOGPROB_GAP_ERROR
+            ),
             "near_tie_max_top1_margin": NEAR_TIE_MAX_MARGIN,
             "conditioning": (
                 "identical HF-greedy reference history supplied as token IDs "

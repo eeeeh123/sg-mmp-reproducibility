@@ -17,7 +17,8 @@ The scientific contract is in `protocol_lock.json`. In particular:
   that K-quants structurally fall back on eligible Qwen tensor dimensions;
   no such fallback is accepted by the final per-tensor audit;
 - embeddings and a stored output head remain F16;
-- FP16 conversion fidelity uses identical-token-history, teacher-forced logits;
+- FP16 conversion fidelity uses identical-token-history, teacher-forced logits
+  and decision-relative top-2 gap errors rather than absolute probability scale;
   free-running continuation equality is retained as a diagnostic because a
   numerically near-tied first token can amplify into a different trajectory;
 - conversion evidence is bound to the locked gate-policy hash, and superseded

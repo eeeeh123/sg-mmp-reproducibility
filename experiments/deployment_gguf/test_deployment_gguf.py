@@ -124,6 +124,23 @@ class ProtocolTests(unittest.TestCase):
         self.assertLessEqual(row["max_critical_logprob_abs_error"], 0.05)
         self.assertTrue(row["passed"])
 
+    def test_reference_logits_use_decision_relative_gap(self):
+        hf = self._top8((10, -1.00), (11, -1.50))
+        gguf = self._top8((10, -1.08), (11, -1.66), tail_shift=-0.08)
+        row = gates._reference_logprob_agreement(hf, gguf)
+        self.assertGreater(row["max_critical_logprob_abs_error"], 0.05)
+        self.assertAlmostEqual(row["max_critical_logprob_gap_abs_error"], 0.08)
+        self.assertTrue(row["same_top1"])
+        self.assertTrue(row["passed"])
+
+    def test_reference_logits_reject_distorted_decision_margin(self):
+        hf = self._top8((10, -1.00), (11, -1.50))
+        gguf = self._top8((10, -1.08), (11, -1.69), tail_shift=-0.08)
+        row = gates._reference_logprob_agreement(hf, gguf)
+        self.assertGreater(row["max_critical_logprob_gap_abs_error"], 0.10)
+        self.assertTrue(row["same_top1"])
+        self.assertFalse(row["passed"])
+
     def test_reference_logits_reject_decisive_top1_flip(self):
         hf = self._top8((10, -1.00), (11, -1.30))
         gguf = self._top8((11, -1.00), (10, -1.30))

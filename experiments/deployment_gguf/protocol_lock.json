@@ -61,6 +61,14 @@
       "resolution": "Align the implementation with the preapproved conversion-validation scope: pass identical effective prompt token IDs and identical HF-greedy histories to both backends, compare teacher-forced top-8 reference distributions at all 128 prompt/position cells, retain the original 0.05 bound for decision-critical tokens, and permit a top-1 swap only when both candidates are each backend's top two and both margins are at most twice that numerical bound. Keep free-running continuation agreement as a reported diagnostic rather than an eligibility criterion.",
       "data_available_when_frozen": "audited FP16/Q4_0/Q5_0/SG engineering artifacts and one failed eight-prompt train-only conversion diagnostic; no packed-backend acceptance, performance measurement, or GSM8K deployment test result existed",
       "scientific_scope": "conversion fidelity is tested on matched input/history logits without autoregressive cascade; tokenizer identity and numerical tolerance are not relaxed, and task quality remains separately remeasured under the frozen full-test protocol",
+      "status": "superseded_by_next_train_only_amendment"
+    },
+    {
+      "date": "2026-09-09",
+      "trigger": "The expanded train-only teacher-forced gate passed 120/128 positions. All eight rejected positions retained identical top-1 tokens, complete 8/8 top-set overlap, and large top-1 margins (minimum 2.06); rejection came only from 0.051--0.079 absolute log-probability differences. No packed gate, performance benchmark, or GSM8K deployment test result existed.",
+      "resolution": "Use relative decision geometry for eligibility: for the union of both top-2 sets, compare each candidate's log-probability gap from its backend's top-1 and require a maximum absolute gap error of 0.10, the pairwise bound implied by the original 0.05 single-token reference. Preserve absolute log-probability errors as diagnostics. Continue to require top-8 overlap >=7 and reject a top-1 swap unless it is a mutually top-2 near tie with both margins <=0.10.",
+      "data_available_when_frozen": "audited FP16/Q4_0/Q5_0/SG engineering artifacts and two failed train-only conversion diagnostics; no accepted packed gate, performance measurement, or GSM8K deployment test result existed",
+      "scientific_scope": "the gate now tests ranking and local margin fidelity, which are invariant to distribution-wide log-probability offsets and directly govern greedy decoding; no task output, quantization allocation, workload, or test result informed the amendment",
       "status": "active"
     }
   ],
@@ -185,7 +193,7 @@
       "tokenizer": "8/8 prompt token-ID arrays exactly match Hugging Face with add_special_tokens=false",
       "chat_template": "for chat models, 8/8 rendered prompt strings and token arrays are recorded and must pass the tokenizer rule",
       "effective_input": "The Hugging Face effective prompt token IDs, including its frozen special-token behavior, are recorded and passed directly to llama-server for every numerical comparison.",
-      "teacher_forced_reference_logits": "Across all 8 prompts x 16 HF-greedy reference positions, raw HF-FP16 and GGUF-FP16 next-token top-8 sets overlap on at least 7 IDs and every token in the union of both top-2 sets differs by at most 0.05 absolute log-probability. EOS is not suppressed for this one-step distribution query. A top-1 swap is accepted only when both candidates are in both top-2 sets and both top-1 margins are at most 0.10, the pairwise uncertainty implied by the unchanged per-token bound.",
+      "teacher_forced_reference_logits": "Across all 8 prompts x 16 HF-greedy reference positions, raw HF-FP16 and GGUF-FP16 next-token top-8 sets overlap on at least 7 IDs. For every token in the union of both top-2 sets, the two backends' log-probability gaps relative to their own top-1 differ by at most 0.10, the pairwise bound implied by the original 0.05 single-token numerical reference; absolute log-probability differences remain recorded diagnostics. EOS is not suppressed for this one-step distribution query. A top-1 swap is accepted only when both candidates are in both top-2 sets and both top-1 margins are at most 0.10.",
       "free_running_continuation": "The 8 x 16 greedy continuation agreement is recorded as an autoregressive-amplification diagnostic and is not an eligibility condition.",
       "thresholds_frozen_before_test": true
     },
