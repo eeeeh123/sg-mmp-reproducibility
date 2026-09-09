@@ -68,6 +68,25 @@ def _fake_gguf(path: Path) -> None:
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_micro_benchmark_uses_numeric_gpu_layers_for_both_phases(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+            root = Path(temporary)
+            stack.enter_context(mock.patch.object(benchmark, "BENCH_DIR", root))
+            stack.enter_context(mock.patch.object(benchmark, "_require_benchmark_gate",
+                return_value=({"artifact_sha256": "hash"}, {})))
+            stack.enter_context(mock.patch.object(benchmark, "sha256_file", return_value="hash"))
+            stack.enter_context(mock.patch.object(benchmark, "prepare_workload",
+                return_value={"prompt_length_median": 717}))
+            process = stack.enter_context(mock.patch.object(benchmark, "_run_bench_process", return_value={}))
+            benchmark.benchmark_micro("qwen05", "fp16", root, gpu=1, block=0, phase="engineering")
+            self.assertEqual(process.call_count, 2)
+            for call in process.call_args_list:
+                command = call.args[0]
+                self.assertEqual(command[command.index("--n-gpu-layers")+1], "-1")
+                self.assertEqual(command[command.index("--flash-attn")+1], "on")
+                self.assertEqual(call.kwargs["gpu"], 1)
+
     def test_protocol_is_pinned_and_claim_limited(self):
         lock = protocol_lock()
         self.assertEqual(lock["llama_cpp"]["commit"], LLAMA_CPP_COMMIT)

@@ -183,7 +183,10 @@ def _run_bench_process(
                 sampler.stop()
     elapsed = time.perf_counter() - started
     if returncode:
-        raise RuntimeError(f"llama-bench failed; inspect {raw_stderr}")
+        detail = raw_stderr.read_text(encoding="utf-8", errors="replace")[-4000:]
+        raise RuntimeError(
+            f"llama-bench exited {returncode}; inspect {raw_stderr}\n{detail}"
+        )
     try:
         parsed = json.loads(raw_stdout.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -260,7 +263,7 @@ def benchmark_micro(
         "--output",
         "json",
         "--n-gpu-layers",
-        "all",
+        "-1",  # Pinned llama-bench uses -1 for all layers; not server's "all".
         "--device",
         "CUDA0",
         "--cache-type-k",
