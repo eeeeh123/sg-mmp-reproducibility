@@ -34,6 +34,7 @@ from experiments.deployment_gguf.protocol import (
     artifact_path,
     atomic_write_json,
     binary_paths,
+    conversion_gate_policy_sha256,
     sha256_file,
 )
 from experiments.deployment_gguf.quality import load_prompts
@@ -94,17 +95,35 @@ def prepare_workload(model_key: str) -> dict:
 
 
 def _require_benchmark_gate(model_key: str, method: str) -> tuple[dict, dict]:
+    conversion = STATUS_DIR / "gates" / model_key / "conversion.json"
     gate = STATUS_DIR / "gates" / model_key / f"packed__{method}.json"
     manifest = artifact_manifest_path(model_key, method)
     records = []
-    for path in (gate, manifest):
+    for path in (conversion, gate, manifest):
         if not path.is_file():
             raise RuntimeError(f"Benchmark locked until gate passes: {path}")
         record = json.loads(path.read_text(encoding="utf-8"))
         if record.get("gate_passed") is not True:
             raise RuntimeError(f"Benchmark locked until gate passes: {path}")
         records.append(record)
-    gate_record, manifest_record = records
+    conversion_record, gate_record, manifest_record = records
+    if conversion_record.get("model_key") != model_key:
+        raise RuntimeError("Conversion gate belongs to another model")
+    if (
+        conversion_record.get("conversion_gate_policy_sha256")
+        != conversion_gate_policy_sha256()
+    ):
+        raise RuntimeError("Conversion gate belongs to an obsolete gate policy")
+    if (
+        gate_record.get("model_key") != model_key
+        or gate_record.get("method") != method
+    ):
+        raise RuntimeError("Packed gate belongs to another model or method")
+    if (
+        manifest_record.get("model_key") != model_key
+        or manifest_record.get("method") != method
+    ):
+        raise RuntimeError("Artifact manifest belongs to another model or method")
     if gate_record.get("artifact_sha256") != manifest_record.get("artifact_sha256"):
         raise RuntimeError("Packed gate and artifact manifest hashes disagree")
     return manifest_record, gate_record

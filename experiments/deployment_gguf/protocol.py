@@ -104,6 +104,11 @@ def quantization_policy_sha256(method: str) -> str:
     )
 
 
+def conversion_gate_policy_sha256() -> str:
+    """Bind conversion evidence to the exact currently locked gate semantics."""
+    return json_sha256(protocol_lock()["gates"]["conversion"])
+
+
 def atomic_write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(

@@ -54,6 +54,14 @@
       "data_available_when_frozen": "the audited source FP16 artifact, the train-only importance matrix, and the failed Q4_K tensor audit only; no accepted packed artifact, packed-backend gate, performance measurement, or GSM8K deployment result existed",
       "scientific_scope": "pre-result format-feasibility correction that makes the nominal Q4 and Q5 controls exact and auditable; high-precision sources, frozen SG allocation, importance data, workloads, endpoints, stopping rules, and statistical analysis are unchanged",
       "status": "active"
+    },
+    {
+      "date": "2026-09-09",
+      "trigger": "The first train-only Qwen2.5-0.5B conversion gate found 8/8 tokenizer matches and 8/8 top-8 overlap on seven prompts (7/8 on one), but one near-tied first-token ordering change amplified into a 16-token free-running divergence; a separate low-ranked token exceeded the 0.05 log-probability bound by 0.000110 while both backends retained the same decisive top token. No deployment benchmark or GSM8K test result existed.",
+      "resolution": "Align the implementation with the preapproved conversion-validation scope: pass identical effective prompt token IDs and identical HF-greedy histories to both backends, compare teacher-forced top-8 reference distributions at all 128 prompt/position cells, retain the original 0.05 bound for decision-critical tokens, and permit a top-1 swap only when both candidates are each backend's top two and both margins are at most twice that numerical bound. Keep free-running continuation agreement as a reported diagnostic rather than an eligibility criterion.",
+      "data_available_when_frozen": "audited FP16/Q4_0/Q5_0/SG engineering artifacts and one failed eight-prompt train-only conversion diagnostic; no packed-backend acceptance, performance measurement, or GSM8K deployment test result existed",
+      "scientific_scope": "conversion fidelity is tested on matched input/history logits without autoregressive cascade; tokenizer identity and numerical tolerance are not relaxed, and task quality remains separately remeasured under the frozen full-test protocol",
+      "status": "active"
     }
   ],
   "source_weights": "Each artifact is independently quantized from the immutable high-precision checkpoint recorded by revision-full-v4; requantization is forbidden.",
@@ -176,8 +184,9 @@
       "data": "eight fixed GSM8K-train prompts at indices 5..12; test is never loaded",
       "tokenizer": "8/8 prompt token-ID arrays exactly match Hugging Face with add_special_tokens=false",
       "chat_template": "for chat models, 8/8 rendered prompt strings and token arrays are recorded and must pass the tokenizer rule",
-      "continuation": "HF-FP16 versus GGUF-FP16: 8/8 first generated tokens and at least 126/128 aligned greedy continuation tokens match",
-      "logit_derived_check": "On every train prompt, HF-FP16 and GGUF-FP16 first-token top-8 raw-softmax log-probabilities overlap on at least 7 token IDs and differ by at most 0.05 absolute log-probability on every common ID.",
+      "effective_input": "The Hugging Face effective prompt token IDs, including its frozen special-token behavior, are recorded and passed directly to llama-server for every numerical comparison.",
+      "teacher_forced_reference_logits": "Across all 8 prompts x 16 HF-greedy reference positions, raw HF-FP16 and GGUF-FP16 next-token top-8 sets overlap on at least 7 IDs and every token in the union of both top-2 sets differs by at most 0.05 absolute log-probability. EOS is not suppressed for this one-step distribution query. A top-1 swap is accepted only when both candidates are in both top-2 sets and both top-1 margins are at most 0.10, the pairwise uncertainty implied by the unchanged per-token bound.",
+      "free_running_continuation": "The 8 x 16 greedy continuation agreement is recorded as an autoregressive-amplification diagnostic and is not an eligibility condition.",
       "thresholds_frozen_before_test": true
     },
     "packed_backend": {

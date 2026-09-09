@@ -41,6 +41,7 @@ from experiments.deployment_gguf.protocol import (
     STATUS_DIR,
     OUT,
     atomic_write_json,
+    conversion_gate_policy_sha256,
     protocol_lock,
     sha256_file,
 )
@@ -108,9 +109,17 @@ def readiness(stage: str) -> dict:
                     ):
                         errors.append(f"stale quality summary {summary}")
         conversion = STATUS_DIR / "gates" / model / "conversion.json"
-        if not conversion.is_file() or json.loads(
-            conversion.read_text(encoding="utf-8")
-        ).get("gate_passed") is not True:
+        conversion_record = (
+            json.loads(conversion.read_text(encoding="utf-8"))
+            if conversion.is_file()
+            else {}
+        )
+        if (
+            conversion_record.get("gate_passed") is not True
+            or conversion_record.get("model_key") != model
+            or conversion_record.get("conversion_gate_policy_sha256")
+            != conversion_gate_policy_sha256()
+        ):
             errors.append(f"missing or failed {conversion}")
         analysis = OUT / "analysis" / stage / f"{model}.json"
         if not analysis.is_file():

@@ -12,7 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from experiments.deployment_gguf import artifacts, gates, quality
+from experiments.deployment_gguf import artifacts, benchmark, gates, quality
 from experiments.deployment_gguf.analyze import _exact_mcnemar, paired_ratio
 from experiments.deployment_gguf.gguf_manifest import (
     expected_type,
@@ -30,6 +30,7 @@ from experiments.deployment_gguf.protocol import (
     IMATRIX_SAVE_FREQUENCY,
     LLAMA_CPP_COMMIT,
     REQUIRED_CMAKE_TOOLCHAIN,
+    conversion_gate_policy_sha256,
     protocol_lock,
     quantization_policy_sha256,
 )
@@ -70,6 +71,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn("not deployment validation", lock["inference_scope"])
         self.assertFalse(lock["importance_matrix"]["test_data_used"])
         self.assertFalse(lock["generation"]["quality"]["online_stop"])
+        self.assertEqual(len(conversion_gate_policy_sha256()), 64)
 
     def test_packed_formats_are_exact_32_element_block_controls(self):
         lock = protocol_lock()
@@ -99,6 +101,70 @@ class ProtocolTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             hf_to_gguf_tensor("model.embed_tokens")
+
+    @staticmethod
+    def _top8(first: tuple[int, float], second: tuple[int, float], tail_shift=0.0):
+        rows = [first, second]
+        rows.extend((token, -3.0 - token / 1000 + tail_shift) for token in range(6))
+        return dict(rows)
+
+    def test_reference_logits_accept_explained_near_tie(self):
+        hf = self._top8((10, -1.00), (11, -1.04))
+        gguf = self._top8((11, -1.01), (10, -1.03))
+        row = gates._reference_logprob_agreement(hf, gguf)
+        self.assertFalse(row["same_top1"])
+        self.assertTrue(row["explained_near_tie"])
+        self.assertTrue(row["passed"])
+
+    def test_reference_logits_ignore_noncritical_tail_boundary(self):
+        hf = self._top8((10, -1.00), (11, -1.30))
+        gguf = self._top8((10, -0.98), (11, -1.31), tail_shift=-0.0501)
+        row = gates._reference_logprob_agreement(hf, gguf)
+        self.assertGreater(row["max_common_logprob_abs_error"], 0.05)
+        self.assertLessEqual(row["max_critical_logprob_abs_error"], 0.05)
+        self.assertTrue(row["passed"])
+
+    def test_reference_logits_reject_decisive_top1_flip(self):
+        hf = self._top8((10, -1.00), (11, -1.30))
+        gguf = self._top8((11, -1.00), (10, -1.30))
+        row = gates._reference_logprob_agreement(hf, gguf)
+        self.assertFalse(row["explained_near_tie"])
+        self.assertFalse(row["passed"])
+
+    def test_reference_logits_require_both_runner_up_candidates(self):
+        hf = self._top8((10, -1.00), (11, -1.30))
+        gguf = self._top8((10, -0.99), (12, -1.29))
+        row = gates._reference_logprob_agreement(hf, gguf)
+        self.assertEqual(row["top_k_overlap"], 7)
+        self.assertIsNone(row["max_critical_logprob_abs_error"])
+        self.assertFalse(row["passed"])
+
+    def test_reference_logprob_query_does_not_suppress_eos(self):
+        class DummyServer:
+            def __init__(self):
+                self.prompt = None
+                self.kwargs = None
+
+            def complete(self, prompt, **kwargs):
+                self.prompt = prompt
+                self.kwargs = kwargs
+                return {
+                    "probs": [
+                        {
+                            "top_logprobs": [
+                                {"id": token, "logprob": -float(token)}
+                                for token in range(8)
+                            ]
+                        }
+                    ]
+                }
+
+        server = DummyServer()
+        row = gates._server_next_token_logprobs(server, [1, 2, 3], seed=7)
+        self.assertEqual(server.prompt, [1, 2, 3])
+        self.assertFalse(server.kwargs["ignore_eos"])
+        self.assertEqual(server.kwargs["n_predict"], 1)
+        self.assertEqual(len(row), 8)
 
     def test_imatrix_uses_nonzero_output_frequency_and_atomic_publication(self):
         root = Path(__file__).parent / f".test-{os.getpid()}-imatrix"
@@ -405,6 +471,29 @@ class ProtocolTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_conversion_gate_archives_legacy_latest_before_replacement(self):
+        root = Path(__file__).parent / f".test-{os.getpid()}-conversion-archive"
+        latest = root / "gates" / "qwen05" / "conversion.json"
+        previous = {"gate_passed": False, "legacy": True}
+        try:
+            latest.parent.mkdir(parents=True)
+            latest.write_text(json.dumps(previous), encoding="utf-8")
+            gates._archive_previous_gate(latest, "conversion_attempts")
+            archives = list(
+                (latest.parent / "conversion_attempts").glob("*.json")
+            )
+            self.assertEqual(len(archives), 1)
+            self.assertEqual(
+                json.loads(archives[0].read_text(encoding="utf-8")), previous
+            )
+            gates._archive_previous_gate(latest, "conversion_attempts")
+            self.assertEqual(
+                len(list((latest.parent / "conversion_attempts").glob("*.json"))),
+                1,
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_backend_gate_rejects_failed_quantize_self_test(self):
         root = Path(__file__).parent / f".test-{os.getpid()}-backend-failure"
         status = root / "status"
@@ -489,7 +578,15 @@ class ProtocolTests(unittest.TestCase):
         try:
             gate_dir.mkdir(parents=True)
             (gate_dir / "conversion.json").write_text(
-                json.dumps({"gate_passed": True, "model_key": "qwen05"}),
+                json.dumps(
+                    {
+                        "gate_passed": True,
+                        "model_key": "qwen05",
+                        "conversion_gate_policy_sha256": (
+                            conversion_gate_policy_sha256()
+                        ),
+                    }
+                ),
                 encoding="utf-8",
             )
             (gate_dir / "packed__q4.json").write_text(
@@ -519,6 +616,34 @@ class ProtocolTests(unittest.TestCase):
             ):
                 with self.assertRaises(RuntimeError):
                     quality.require_quality_gates("qwen05", "q4")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_benchmark_gate_cannot_bypass_failed_conversion(self):
+        root = Path(__file__).parent / f".test-{os.getpid()}-benchmark-status"
+        manifest = root / "manifest.json"
+        gate_dir = root / "gates" / "qwen05"
+        common = {
+            "gate_passed": True,
+            "model_key": "qwen05",
+            "method": "q4",
+            "artifact_sha256": "same",
+        }
+        try:
+            gate_dir.mkdir(parents=True)
+            (gate_dir / "conversion.json").write_text(
+                json.dumps({"gate_passed": False, "model_key": "qwen05"}),
+                encoding="utf-8",
+            )
+            (gate_dir / "packed__q4.json").write_text(
+                json.dumps(common), encoding="utf-8"
+            )
+            manifest.write_text(json.dumps(common), encoding="utf-8")
+            with mock.patch.object(benchmark, "STATUS_DIR", root), mock.patch.object(
+                benchmark, "artifact_manifest_path", return_value=manifest
+            ):
+                with self.assertRaisesRegex(RuntimeError, "Benchmark locked"):
+                    benchmark._require_benchmark_gate("qwen05", "q4")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

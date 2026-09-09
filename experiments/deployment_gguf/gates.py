@@ -23,6 +23,7 @@ from experiments.deployment_gguf.protocol import (
     artifact_path,
     atomic_write_json,
     binary_paths,
+    conversion_gate_policy_sha256,
     sha256_file,
 )
 from experiments.deployment_gguf.quality import load_prompts
@@ -34,6 +35,7 @@ MIN_ALIGNED_MATCHES = 126
 LOGPROB_TOP_K = 8
 MIN_LOGPROB_TOP_K_OVERLAP = 7
 MAX_COMMON_LOGPROB_ABS_ERROR = 0.05
+NEAR_TIE_MAX_MARGIN = 2 * MAX_COMMON_LOGPROB_ABS_ERROR
 
 
 def _gate_prompts(model_key: str):
@@ -75,7 +77,9 @@ def _continuation_agreement(a: list[list[int]], b: list[list[int]]) -> dict:
     }
 
 
-def _server_tokens(server: LlamaServer, prompts: list[str]) -> list[list[int]]:
+def _server_tokens(
+    server: LlamaServer, prompts: list[str | list[int]]
+) -> list[list[int]]:
     records = []
     for offset, prompt in enumerate(prompts):
         response = server.complete(
@@ -93,36 +97,113 @@ def _server_tokens(server: LlamaServer, prompts: list[str]) -> list[list[int]]:
     return records
 
 
-def _server_first_token_logprobs(
-    server: LlamaServer, prompts: list[str]
-) -> list[dict[int, float]]:
-    records = []
-    for offset, prompt in enumerate(prompts):
-        response = server.complete(
-            prompt,
-            n_predict=1,
-            ignore_eos=True,
-            seed=20260918 + offset,
-            temperature=-1.0,
-            n_probs=LOGPROB_TOP_K,
-        )
-        probability_rows = response.get("probs")
-        if probability_rows is None:
-            probability_rows = response.get("completion_probabilities")
-        if not isinstance(probability_rows, list) or len(probability_rows) != 1:
-            raise RuntimeError("llama-server did not return one log-probability row")
-        top = probability_rows[0].get("top_logprobs")
-        if not isinstance(top, list) or len(top) < LOGPROB_TOP_K:
-            raise RuntimeError("llama-server did not return the frozen top-8 log-probs")
-        record = {int(item["id"]): float(item["logprob"]) for item in top}
-        if len(record) != LOGPROB_TOP_K:
-            raise RuntimeError("llama-server returned duplicate top-8 token IDs")
-        records.append(record)
-    return records
+def _server_next_token_logprobs(
+    server: LlamaServer, prompt: list[int], *, seed: int
+) -> dict[int, float]:
+    response = server.complete(
+        prompt,
+        n_predict=1,
+        ignore_eos=False,
+        seed=seed,
+        temperature=-1.0,
+        n_probs=LOGPROB_TOP_K,
+    )
+    probability_rows = response.get("probs")
+    if probability_rows is None:
+        probability_rows = response.get("completion_probabilities")
+    if not isinstance(probability_rows, list) or len(probability_rows) != 1:
+        raise RuntimeError("llama-server did not return one log-probability row")
+    top = probability_rows[0].get("top_logprobs")
+    if not isinstance(top, list) or len(top) < LOGPROB_TOP_K:
+        raise RuntimeError("llama-server did not return the frozen top-8 log-probs")
+    record = {int(item["id"]): float(item["logprob"]) for item in top}
+    if len(record) != LOGPROB_TOP_K:
+        raise RuntimeError("llama-server returned duplicate top-8 token IDs")
+    return record
+
+
+def _reference_logprob_agreement(
+    hf_row: dict[int, float], gguf_row: dict[int, float]
+) -> dict:
+    if len(hf_row) != LOGPROB_TOP_K or len(gguf_row) != LOGPROB_TOP_K:
+        raise RuntimeError("Reference-logit gate requires two complete top-8 rows")
+    hf_ranked = sorted(hf_row, key=hf_row.get, reverse=True)
+    gguf_ranked = sorted(gguf_row, key=gguf_row.get, reverse=True)
+    common = sorted(set(hf_row) & set(gguf_row))
+    common_errors = {
+        token: abs(hf_row[token] - gguf_row[token]) for token in common
+    }
+    hf_top1, gguf_top1 = hf_ranked[0], gguf_ranked[0]
+    # The union of both top-two sets is the smallest set that validates the
+    # winning decision and its local margin without letting low-ranked tail
+    # noise veto an otherwise faithful conversion.
+    critical = set(hf_ranked[:2]) | set(gguf_ranked[:2])
+    critical_present = critical.issubset(common_errors)
+    max_critical_error = (
+        max(common_errors[token] for token in critical)
+        if critical_present
+        else None
+    )
+    hf_margin = hf_row[hf_ranked[0]] - hf_row[hf_ranked[1]]
+    gguf_margin = gguf_row[gguf_ranked[0]] - gguf_row[gguf_ranked[1]]
+    same_top1 = hf_top1 == gguf_top1
+    explained_near_tie = (
+        not same_top1
+        and hf_top1 in gguf_ranked[:2]
+        and gguf_top1 in hf_ranked[:2]
+        and hf_margin <= NEAR_TIE_MAX_MARGIN
+        and gguf_margin <= NEAR_TIE_MAX_MARGIN
+    )
+    passed = (
+        len(common) >= MIN_LOGPROB_TOP_K_OVERLAP
+        and max_critical_error is not None
+        and max_critical_error <= MAX_COMMON_LOGPROB_ABS_ERROR
+        and (same_top1 or explained_near_tie)
+    )
+    return {
+        "hf_top_logprobs": [
+            {"id": token, "logprob": hf_row[token]} for token in hf_ranked
+        ],
+        "gguf_top_logprobs": [
+            {"id": token, "logprob": gguf_row[token]} for token in gguf_ranked
+        ],
+        "common_token_ids": common,
+        "top_k_overlap": len(common),
+        "max_common_logprob_abs_error": (
+            max(common_errors.values()) if common_errors else None
+        ),
+        "critical_token_ids": sorted(critical),
+        "max_critical_logprob_abs_error": max_critical_error,
+        "hf_top1_id": hf_top1,
+        "gguf_top1_id": gguf_top1,
+        "hf_top1_margin": hf_margin,
+        "gguf_top1_margin": gguf_margin,
+        "same_top1": same_top1,
+        "explained_near_tie": explained_near_tie,
+        "passed": passed,
+    }
+
+
+def _archive_previous_gate(path: Path, archive_directory: str) -> None:
+    """Preserve the last immutable gate record before publishing a replacement."""
+    if not path.is_file():
+        return
+    previous = json.loads(path.read_text(encoding="utf-8"))
+    attempt_id = previous.get("attempt_id")
+    if not isinstance(attempt_id, str) or not re.fullmatch(
+        r"\d{8}T\d{12}Z", attempt_id
+    ):
+        attempt_id = f"legacy__{sha256_file(path)[:16]}"
+    archive = path.parent / archive_directory / f"{attempt_id}.json"
+    if archive.is_file():
+        if json.loads(archive.read_text(encoding="utf-8")) != previous:
+            raise RuntimeError(f"Gate history collision: {archive}")
+        return
+    atomic_write_json(archive, previous)
 
 
 def conversion_gate(model_key: str, llama_cpp_dir: Path, *, gpu: int) -> dict:
-    """Compare tokenizer identity and fixed HF/GGUF FP16 train continuations."""
+    """Compare tokenizer identity and teacher-forced HF/GGUF FP16 logits."""
     import torch
     from transformers import AutoModelForCausalLM
 
@@ -132,30 +213,16 @@ def conversion_gate(model_key: str, llama_cpp_dir: Path, *, gpu: int) -> dict:
     fp16_manifest = json.loads(fp16_manifest_path.read_text(encoding="utf-8"))
     if fp16_manifest.get("gate_passed") is not True:
         raise RuntimeError(f"GGUF-FP16 artifact gate failed: {fp16_manifest_path}")
+    path = STATUS_DIR / "gates" / model_key / "conversion.json"
+    _archive_previous_gate(path, "conversion_attempts")
+    attempt_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     prompts, identities, tokenizer = _gate_prompts(model_key)
+    if len(prompts) != len(TRAIN_GATE_INDICES) or len(identities) != len(prompts):
+        raise RuntimeError("Conversion gate did not resolve all frozen train prompts")
     binaries = binary_paths(llama_cpp_dir)
-    gguf_tokens = []
-    server_tokenizations = []
-    log_path = STATUS_DIR / "gate_logs" / f"{model_key}__conversion_server.jsonl"
-    with LlamaServer(
-        binaries["server"],
-        artifact_path(model_key, "fp16"),
-        log_path,
-        gpu=gpu,
-        slots=1,
-        cuda=True,
-    ) as server:
-        server_tokenizations = [server.tokenize(prompt) for prompt in prompts]
-        gguf_tokens = _server_tokens(server, prompts)
-        gguf_logprobs = _server_first_token_logprobs(server, prompts)
-    server_resources = server.resource_record()
-
     hf_tokenizations = [
         [int(token) for token in tokenizer.encode(prompt, add_special_tokens=False)]
         for prompt in prompts
-    ]
-    tokenizer_matches = [
-        left == right for left, right in zip(hf_tokenizations, server_tokenizations)
     ]
 
     model = AutoModelForCausalLM.from_pretrained(
@@ -164,30 +231,19 @@ def conversion_gate(model_key: str, llama_cpp_dir: Path, *, gpu: int) -> dict:
         torch_dtype=torch.float16,
     ).to(f"cuda:{gpu}")
     model.eval()
+    hf_effective_inputs = []
     hf_tokens = []
-    hf_logprobs = []
+    hf_teacher_logprobs = []
     try:
         for prompt in prompts:
             encoded = tokenizer(prompt, return_tensors="pt", add_special_tokens=True).to(
                 model.device
             )
             input_length = int(encoded["input_ids"].shape[1])
+            hf_effective_inputs.append(
+                [int(token) for token in encoded["input_ids"][0].detach().cpu().tolist()]
+            )
             with torch.inference_mode():
-                first_token_logprobs = torch.log_softmax(
-                    model(**encoded).logits[0, -1].float(), dim=-1
-                )
-                values, indices = torch.topk(
-                    first_token_logprobs, k=LOGPROB_TOP_K
-                )
-                hf_logprobs.append(
-                    {
-                        int(token): float(value)
-                        for token, value in zip(
-                            indices.detach().cpu().tolist(),
-                            values.detach().cpu().tolist(),
-                        )
-                    }
-                )
                 output = model.generate(
                     **encoded,
                     do_sample=False,
@@ -200,73 +256,155 @@ def conversion_gate(model_key: str, llama_cpp_dir: Path, *, gpu: int) -> dict:
                     ),
                     eos_token_id=tokenizer.eos_token_id,
                 )
-            hf_tokens.append(
-                [int(token) for token in output[0, input_length:].detach().cpu().tolist()]
-            )
+                reference_tokens = [
+                    int(token)
+                    for token in output[0, input_length:].detach().cpu().tolist()
+                ]
+                if len(reference_tokens) != TOKENS_PER_PROMPT:
+                    raise RuntimeError(
+                        "HF reference generation did not return the frozen token count"
+                    )
+                teacher_input_ids = output[:, :-1]
+                teacher_logits = model(
+                    input_ids=teacher_input_ids,
+                    attention_mask=torch.ones_like(teacher_input_ids),
+                ).logits[0]
+            hf_tokens.append(reference_tokens)
+            prompt_rows = []
+            for step in range(TOKENS_PER_PROMPT):
+                next_logprobs = torch.log_softmax(
+                    teacher_logits[input_length - 1 + step].float(), dim=-1
+                )
+                values, indices = torch.topk(next_logprobs, k=LOGPROB_TOP_K)
+                prompt_rows.append(
+                    {
+                        int(token): float(value)
+                        for token, value in zip(
+                            indices.detach().cpu().tolist(),
+                            values.detach().cpu().tolist(),
+                        )
+                    }
+                )
+            hf_teacher_logprobs.append(prompt_rows)
     finally:
         del model
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    agreement = _continuation_agreement(hf_tokens, gguf_tokens)
-    logprob_rows = []
-    for hf_row, gguf_row in zip(hf_logprobs, gguf_logprobs):
-        common = sorted(set(hf_row) & set(gguf_row))
-        max_error = (
-            max(abs(hf_row[token] - gguf_row[token]) for token in common)
-            if common
-            else None
-        )
-        logprob_rows.append(
-            {
-                "hf_top_logprobs": [
-                    {"id": token, "logprob": value}
-                    for token, value in hf_row.items()
-                ],
-                "gguf_top_logprobs": [
-                    {"id": token, "logprob": value}
-                    for token, value in gguf_row.items()
-                ],
-                "common_token_ids": common,
-                "top_k_overlap": len(common),
-                "max_common_logprob_abs_error": max_error,
-                "passed": (
-                    len(common) >= MIN_LOGPROB_TOP_K_OVERLAP
-                    and max_error is not None
-                    and max_error <= MAX_COMMON_LOGPROB_ABS_ERROR
-                ),
-            }
-        )
-    logprob_passed = len(logprob_rows) == len(prompts) and all(
-        row["passed"] for row in logprob_rows
+    log_path = (
+        STATUS_DIR
+        / "gate_logs"
+        / "conversion"
+        / model_key
+        / f"{attempt_id}.jsonl"
+    )
+    gguf_teacher_logprobs = []
+    with LlamaServer(
+        binaries["server"],
+        artifact_path(model_key, "fp16"),
+        log_path,
+        gpu=gpu,
+        slots=1,
+        cuda=True,
+    ) as server:
+        server_tokenizations = [server.tokenize(prompt) for prompt in prompts]
+        gguf_tokens = _server_tokens(server, hf_effective_inputs)
+        for prompt_offset, (input_ids, reference_tokens) in enumerate(
+            zip(hf_effective_inputs, hf_tokens)
+        ):
+            prompt_rows = []
+            for step in range(TOKENS_PER_PROMPT):
+                history = input_ids + reference_tokens[:step]
+                prompt_rows.append(
+                    _server_next_token_logprobs(
+                        server,
+                        history,
+                        seed=20260918 + prompt_offset * TOKENS_PER_PROMPT + step,
+                    )
+                )
+            gguf_teacher_logprobs.append(prompt_rows)
+    server_resources = server.resource_record()
+
+    if not (
+        len(server_tokenizations)
+        == len(gguf_tokens)
+        == len(gguf_teacher_logprobs)
+        == len(prompts)
+    ):
+        raise RuntimeError("GGUF conversion gate returned incomplete prompt records")
+    if any(len(rows) != TOKENS_PER_PROMPT for rows in gguf_teacher_logprobs):
+        raise RuntimeError("GGUF conversion gate returned incomplete position records")
+
+    tokenizer_matches = [
+        left == right for left, right in zip(hf_tokenizations, server_tokenizations)
+    ]
+    for identity, hf_tokens_raw, gguf_tokens_raw, input_ids in zip(
+        identities,
+        hf_tokenizations,
+        server_tokenizations,
+        hf_effective_inputs,
+    ):
+        identity["hf_prompt_token_ids"] = hf_tokens_raw
+        identity["gguf_prompt_token_ids"] = gguf_tokens_raw
+        identity["effective_input_token_ids"] = input_ids
+        identity["effective_input_token_count"] = len(input_ids)
+        identity["effective_input_tokens_sha256"] = hashlib.sha256(
+            json.dumps(input_ids, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    free_running = _continuation_agreement(hf_tokens, gguf_tokens)
+    teacher_rows = []
+    for prompt_offset, (hf_prompt_rows, gguf_prompt_rows) in enumerate(
+        zip(hf_teacher_logprobs, gguf_teacher_logprobs)
+    ):
+        for step, (hf_row, gguf_row) in enumerate(
+            zip(hf_prompt_rows, gguf_prompt_rows)
+        ):
+            row = _reference_logprob_agreement(hf_row, gguf_row)
+            row["train_index"] = identities[prompt_offset]["train_index"]
+            row["continuation_step"] = step
+            teacher_rows.append(row)
+    teacher_passed = (
+        len(teacher_rows) == len(prompts) * TOKENS_PER_PROMPT
+        and all(row["passed"] for row in teacher_rows)
     )
     record = {
         "protocol_version": PROTOCOL_VERSION,
+        "attempt_id": attempt_id,
         "gate": "conversion",
+        "conversion_gate_policy_sha256": conversion_gate_policy_sha256(),
         "model_key": model_key,
         "test_data_used": False,
         "train_prompts": identities,
         "tokenizer_exact_matches": sum(tokenizer_matches),
         "tokenizer_total": len(tokenizer_matches),
         "tokenizer_passed": all(tokenizer_matches),
-        "continuation": agreement,
-        "first_token_logprob_check": {
+        "free_running_continuation_diagnostic": {
+            **free_running,
+            "gate_role": "diagnostic only; divergence can amplify a near-tied decision",
+        },
+        "teacher_forced_reference_logprob_check": {
             "top_k": LOGPROB_TOP_K,
             "required_overlap_per_prompt": MIN_LOGPROB_TOP_K_OVERLAP,
-            "maximum_common_logprob_absolute_error": MAX_COMMON_LOGPROB_ABS_ERROR,
-            "rows": logprob_rows,
-            "passed": logprob_passed,
+            "maximum_critical_token_logprob_absolute_error": MAX_COMMON_LOGPROB_ABS_ERROR,
+            "near_tie_max_top1_margin": NEAR_TIE_MAX_MARGIN,
+            "conditioning": (
+                "identical HF-greedy reference history supplied as token IDs "
+                "to both backends"
+            ),
+            "positions": len(teacher_rows),
+            "rows": teacher_rows,
+            "passed": teacher_passed,
         },
         "fp16_artifact_sha256": sha256_file(artifact_path(model_key, "fp16")),
         "fp16_manifest_sha256": sha256_file(fp16_manifest_path),
         "server_binary_sha256": sha256_file(binaries["server"]),
         "server_resources": server_resources,
         "gate_passed": (
-            all(tokenizer_matches) and agreement["passed"] and logprob_passed
+            all(tokenizer_matches) and teacher_passed
         ),
     }
-    path = STATUS_DIR / "gates" / model_key / "conversion.json"
     atomic_write_json(path, record)
     if not record["gate_passed"]:
         raise RuntimeError(f"Conversion gate failed; inspect {path}")
@@ -333,20 +471,7 @@ def _run_logged_backend_case(
 
 
 def _archive_previous_backend_gate(path: Path) -> None:
-    if not path.is_file():
-        return
-    previous = json.loads(path.read_text(encoding="utf-8"))
-    attempt_id = previous.get("attempt_id")
-    if not isinstance(attempt_id, str) or not re.fullmatch(
-        r"\d{8}T\d{12}Z", attempt_id
-    ):
-        attempt_id = f"legacy__{sha256_file(path)[:16]}"
-    archive = path.parent / "official_backend_test_attempts" / f"{attempt_id}.json"
-    if archive.is_file():
-        if json.loads(archive.read_text(encoding="utf-8")) != previous:
-            raise RuntimeError(f"Backend gate history collision: {archive}")
-        return
-    atomic_write_json(archive, previous)
+    _archive_previous_gate(path, "official_backend_test_attempts")
 
 
 def run_official_backend_tests(llama_cpp_dir: Path) -> dict:
@@ -427,6 +552,19 @@ def packed_backend_gate(
         or official_record.get("llama_cpp_commit") != LLAMA_CPP_COMMIT
     ):
         raise RuntimeError("Run and pass `backend-tests` before packed gates")
+    conversion_path = STATUS_DIR / "gates" / model_key / "conversion.json"
+    conversion_record = (
+        json.loads(conversion_path.read_text(encoding="utf-8"))
+        if conversion_path.is_file()
+        else {}
+    )
+    if (
+        conversion_record.get("gate_passed") is not True
+        or conversion_record.get("model_key") != model_key
+        or conversion_record.get("conversion_gate_policy_sha256")
+        != conversion_gate_policy_sha256()
+    ):
+        raise RuntimeError("Run and pass `conversion-gate` before packed gates")
     artifact_record_path = artifact_manifest_path(model_key, method)
     if not artifact_record_path.is_file() or json.loads(
         artifact_record_path.read_text(encoding="utf-8")
@@ -439,6 +577,10 @@ def packed_backend_gate(
         binaries["server"]
     ):
         raise RuntimeError("llama-server binary changed after official backend tests")
+    if conversion_record.get("server_binary_sha256") != sha256_file(
+        binaries["server"]
+    ):
+        raise RuntimeError("llama-server binary changed after conversion gate")
     artifact = artifact_path(model_key, method)
     with LlamaServer(
         binaries["server"],

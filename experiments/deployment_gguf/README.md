@@ -17,6 +17,11 @@ The scientific contract is in `protocol_lock.json`. In particular:
   that K-quants structurally fall back on eligible Qwen tensor dimensions;
   no such fallback is accepted by the final per-tensor audit;
 - embeddings and a stored output head remain F16;
+- FP16 conversion fidelity uses identical-token-history, teacher-forced logits;
+  free-running continuation equality is retained as a diagnostic because a
+  numerically near-tied first token can amplify into a different trajectory;
+- conversion evidence is bound to the locked gate-policy hash, and superseded
+  gate records are archived instead of overwritten;
 - no online `Question:` stopping is used; quality retains the original 5-shot,
   greedy, 256-token protocol;
 - engineering, value-pilot, and formal process blocks live in different paths;
