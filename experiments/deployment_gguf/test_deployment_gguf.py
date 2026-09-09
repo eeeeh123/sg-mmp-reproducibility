@@ -15,6 +15,7 @@ from unittest import mock
 from experiments.deployment_gguf import artifacts, gates, quality
 from experiments.deployment_gguf.analyze import _exact_mcnemar, paired_ratio
 from experiments.deployment_gguf.gguf_manifest import (
+    expected_type,
     hf_to_gguf_tensor,
     read_gguf,
     tensor_override,
@@ -30,6 +31,7 @@ from experiments.deployment_gguf.protocol import (
     LLAMA_CPP_COMMIT,
     REQUIRED_CMAKE_TOOLCHAIN,
     protocol_lock,
+    quantization_policy_sha256,
 )
 from experiments.deployment_gguf.quality import strict_prediction
 
@@ -68,6 +70,19 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn("not deployment validation", lock["inference_scope"])
         self.assertFalse(lock["importance_matrix"]["test_data_used"])
         self.assertFalse(lock["generation"]["quality"]["online_stop"])
+
+    def test_packed_formats_are_exact_32_element_block_controls(self):
+        lock = protocol_lock()
+        self.assertEqual(lock["methods"]["q4"]["cli_type"], "Q4_0")
+        self.assertEqual(lock["methods"]["q5"]["cli_type"], "Q5_0")
+        self.assertEqual(expected_type("q4", False), "Q4_0")
+        self.assertEqual(expected_type("q5", False), "Q5_0")
+        self.assertEqual(expected_type("sg", False), "Q4_0")
+        self.assertEqual(expected_type("sg", True), "Q8_0")
+        self.assertEqual(len(quantization_policy_sha256("q4")), 64)
+        self.assertNotEqual(
+            quantization_policy_sha256("q4"), quantization_policy_sha256("sg")
+        )
 
     def test_hf_to_gguf_mapping_is_exact(self):
         self.assertEqual(

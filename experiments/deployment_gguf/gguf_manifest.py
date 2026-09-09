@@ -23,6 +23,7 @@ from experiments.deployment_gguf.protocol import (
     imatrix_path,
     load_frozen_selection,
     protocol_lock,
+    quantization_policy_sha256,
     selection_path,
     sha256_file,
     source_fp16_path,
@@ -245,15 +246,12 @@ def tensor_override(module_name: str, quant_type: str = "q8_0") -> str:
 
 
 def expected_type(method: str, selected: bool) -> str:
-    if method == "fp16":
-        return "F16"
-    if method == "q4":
-        return "Q4_K"
-    if method == "q5":
-        return "Q5_K"
-    if method == "sg":
-        return "Q8_0" if selected else "Q4_K"
-    raise ValueError(method)
+    method_policy = protocol_lock()["methods"].get(method)
+    if method_policy is None:
+        raise ValueError(method)
+    if method == "sg" and selected:
+        return str(method_policy["selected_type"])
+    return str(method_policy["base_type"])
 
 
 def audit_artifact(model_key: str, method: str) -> dict:
@@ -271,6 +269,13 @@ def audit_artifact(model_key: str, method: str) -> dict:
         or registration.get("artifact_sha256") != sha256_file(path)
     ):
         raise RuntimeError(f"Artifact build registration mismatch: {path}")
+    if method != "fp16":
+        policy_sha256 = quantization_policy_sha256(method)
+        if registration.get("quantization_policy_sha256") != policy_sha256:
+            raise RuntimeError(
+                "Packed artifact was built under a different quantization policy; "
+                f"preserve it as diagnostic evidence and rebuild: {path}"
+            )
     gguf = read_gguf(path)
     by_name = {tensor.name: tensor for tensor in gguf["tensors"]}
     selected_hf = set(selection["w8_module_names"])
@@ -352,6 +357,9 @@ def audit_artifact(model_key: str, method: str) -> dict:
         "artifact_sha256": sha256_file(path),
         "build_registration": str(registration_path),
         "build_registration_sha256": sha256_file(registration_path),
+        "quantization_policy_sha256": (
+            None if method == "fp16" else quantization_policy_sha256(method)
+        ),
         "artifact_bytes": artifact_bytes,
         "tensor_payload_bytes": total_payload_bytes,
         "container_metadata_and_alignment_bytes": metadata_bytes,

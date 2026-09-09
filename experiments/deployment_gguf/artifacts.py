@@ -36,6 +36,8 @@ from experiments.deployment_gguf.protocol import (
     calibration_corpus_path,
     imatrix_path,
     load_frozen_selection,
+    protocol_lock,
+    quantization_policy_sha256,
     selection_path,
     sha256_file,
     source_fp16_path,
@@ -574,6 +576,7 @@ def quantize_artifact(
     selection = load_frozen_selection(model_key)
     output = artifact_path(model_key, method)
     registration_path = build_registration_path(model_key, method)
+    policy_sha256 = quantization_policy_sha256(method)
     if output.exists() and not force:
         if not registration_path.is_file():
             raise RuntimeError(
@@ -590,13 +593,15 @@ def quantize_artifact(
             or registration.get("llama_cpp_commit") != LLAMA_CPP_COMMIT
             or registration.get("quantize_binary_sha256")
             != sha256_file(binary_paths(llama_cpp_dir)["quantize"])
+            or registration.get("quantization_policy_sha256") != policy_sha256
         ):
             raise RuntimeError(f"Quantized artifact build registration mismatch: {output}")
         return audit_artifact(model_key, method)
     if output.exists():
         output.unlink()
     output.parent.mkdir(parents=True, exist_ok=True)
-    base = "Q5_K_M" if method == "q5" else "Q4_K_M"
+    method_policy = protocol_lock()["methods"][method]
+    base = str(method_policy["cli_type"])
     binaries = binary_paths(llama_cpp_dir)
     command = [
         str(binaries["quantize"]),
@@ -625,6 +630,9 @@ def quantize_artifact(
         "selection_sha256": sha256_file(selection_path(model_key)),
         "llama_cpp_commit": LLAMA_CPP_COMMIT,
         "quantize_binary_sha256": sha256_file(binaries["quantize"]),
+        "quantization_policy_sha256": policy_sha256,
+        "requested_base_type": method_policy["base_type"],
+        "requested_selected_type": method_policy.get("selected_type"),
         "command": command,
         "requantization": False,
         "artifact_sha256": sha256_file(output),

@@ -11,8 +11,11 @@ The scientific contract is in `protocol_lock.json`. In particular:
 - every artifact starts from the immutable high-precision checkpoint;
 - one pinned llama.cpp commit and one shared WikiText-train importance matrix are
   used within each model;
-- the comparisons are `GGUF-FP16`, `Q4_K-pure`, `Q5_K-pure`, and
-  `SG allocation-GGUF` (Q4_K plus exact frozen Q8_0 tensor overrides);
+- the comparisons are `GGUF-FP16`, `Q4_0-pure`, `Q5_0-pure`, and
+  `SG allocation-GGUF` (Q4_0 plus exact frozen Q8_0 tensor overrides);
+- 32-element-block Q4_0/Q5_0 are intentional: the engineering audit found
+  that K-quants structurally fall back on eligible Qwen tensor dimensions;
+  no such fallback is accepted by the final per-tensor audit;
 - embeddings and a stored output head remain F16;
 - no online `Question:` stopping is used; quality retains the original 5-shot,
   greedy, 256-token protocol;

@@ -91,6 +91,19 @@ def json_sha256(value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def quantization_policy_sha256(method: str) -> str:
+    """Bind a packed artifact to the exact method and tensor policy."""
+    if method not in QUANTIZED_METHODS:
+        raise ValueError(f"No packed quantization policy for method {method!r}")
+    lock = protocol_lock()
+    return json_sha256(
+        {
+            "method": lock["methods"][method],
+            "tensor_policy": lock["tensor_policy"],
+        }
+    )
+
+
 def atomic_write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(

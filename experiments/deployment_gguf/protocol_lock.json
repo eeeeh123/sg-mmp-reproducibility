@@ -46,6 +46,14 @@
       "data_available_when_frozen": "the audited source FP16 GGUF artifact only; no importance matrix, quantized deployment artifact, performance measurement, or GSM8K deployment result existed",
       "scientific_scope": "crash and partial-file repair only; calibration corpus, importance computation, quantization policy, workloads, endpoints, comparisons, stopping rules, and statistical analysis are unchanged",
       "status": "active"
+    },
+    {
+      "date": "2026-09-09",
+      "trigger": "The first engineering Q4 artifact failed the exact tensor-type audit before any packed-backend gate, benchmark, or GSM8K deployment result. The pinned llama.cpp source deterministically falls back from Q4_K to Q5_0 and from Q5_K to Q5_1 when a tensor row is not divisible by the 256-element K-quant block; Qwen2.5-0.5B contains eligible tensors with such dimensions.",
+      "resolution": "Reject and preserve the failed Q4_K artifact, and replace the deployment formats with 32-element-block Q4_0-pure and Q5_0-pure. SG allocation-GGUF uses the identical Q4_0 base plus only the exact frozen Q8_0 module overrides. Every eligible tensor must now match Q4_0, Q5_0, or its prescribed Q8_0 type exactly; no structural fallback is accepted.",
+      "data_available_when_frozen": "the audited source FP16 artifact, the train-only importance matrix, and the failed Q4_K tensor audit only; no accepted packed artifact, packed-backend gate, performance measurement, or GSM8K deployment result existed",
+      "scientific_scope": "pre-result format-feasibility correction that makes the nominal Q4 and Q5 controls exact and auditable; high-precision sources, frozen SG allocation, importance data, workloads, endpoints, stopping rules, and statistical analysis are unchanged",
+      "status": "active"
     }
   ],
   "source_weights": "Each artifact is independently quantized from the immutable high-precision checkpoint recorded by revision-full-v4; requantization is forbidden.",
@@ -62,23 +70,26 @@
       "base_type": "F16"
     },
     "q4": {
-      "label": "Q4_K-pure",
+      "label": "Q4_0-pure",
       "quantizer": "llama-quantize --pure",
-      "base_type": "Q4_K",
+      "cli_type": "Q4_0",
+      "base_type": "Q4_0",
       "token_embedding_type": "F16",
       "output_tensor_type": "F16"
     },
     "q5": {
-      "label": "Q5_K-pure",
+      "label": "Q5_0-pure",
       "quantizer": "llama-quantize --pure",
-      "base_type": "Q5_K",
+      "cli_type": "Q5_0",
+      "base_type": "Q5_0",
       "token_embedding_type": "F16",
       "output_tensor_type": "F16"
     },
     "sg": {
       "label": "SG allocation-GGUF",
       "quantizer": "llama-quantize --pure with exact frozen-module Q8_0 overrides",
-      "base_type": "Q4_K",
+      "cli_type": "Q4_0",
+      "base_type": "Q4_0",
       "selected_type": "Q8_0",
       "token_embedding_type": "F16",
       "output_tensor_type": "F16",
@@ -102,7 +113,7 @@
     "embedding": "F16",
     "output_head": "F16 when stored; an absent tied output is recorded, not duplicated",
     "normalization_and_other_noneligible_tensors": "unchanged conversion/default treatment, audited per artifact",
-    "mapping_requirement": "Every eligible HF module maps exactly once to GGUF and has the prescribed type; missing, duplicate, shape/parameter, or type mismatches hard fail.",
+    "mapping_requirement": "Every eligible HF module maps exactly once to GGUF and has the prescribed Q4_0, Q5_0, or selected Q8_0 type; missing, duplicate, shape/parameter, structural-fallback, or type mismatches hard fail.",
     "budget_policy": "Do not retune the frozen SG selection to match Q5 bytes. Report original logical bpw, packed eligible bpw, whole-artifact bpw, and exact bytes separately."
   },
   "generation": {
