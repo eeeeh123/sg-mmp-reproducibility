@@ -26,6 +26,7 @@ from experiments.deployment_gguf.protocol import (
     binary_paths,
     conversion_gate_policy_sha256,
     packed_gate_policy_sha256,
+    deployment_check_policy_sha256,
     sha256_file,
 )
 from experiments.deployment_gguf.quality import load_prompts
@@ -608,6 +609,70 @@ def _packed_teacher_agreement(cpu_rows, cuda_rows, identities):
         "rows": rows,
         "passed": all(row["passed"] for row in rows),
     }
+
+
+def deployment_check(model_key: str, method: str, llama_cpp_dir: Path, *, gpu: int) -> dict:
+    """Operational eligibility on the target backend, not numerical equivalence."""
+    artifact = artifact_path(model_key, method)
+    binaries = binary_paths(llama_cpp_dir)
+    artifact_hash = sha256_file(artifact)
+    binary_hash = sha256_file(binaries["server"])
+    conversion_path = STATUS_DIR / "gates" / model_key / "conversion.json"
+    conversion = json.loads(conversion_path.read_text(encoding="utf-8"))
+    manifest_path = artifact_manifest_path(model_key, method)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    official_path = STATUS_DIR / "gates" / "official_backend_tests.json"
+    official = json.loads(official_path.read_text(encoding="utf-8"))
+    if (conversion.get("gate_passed") is not True
+            or conversion.get("model_key") != model_key
+            or conversion.get("conversion_gate_policy_sha256") != conversion_gate_policy_sha256()
+            or conversion.get("server_binary_sha256") != binary_hash
+            or conversion.get("fp16_artifact_sha256") != sha256_file(artifact_path(model_key, "fp16"))):
+        raise RuntimeError("Missing or stale FP16 conversion evidence")
+    if (manifest.get("gate_passed") is not True
+            or manifest.get("model_key") != model_key or manifest.get("method") != method
+            or manifest.get("artifact_sha256") != artifact_hash):
+        raise RuntimeError("Missing or stale artifact audit")
+    if (official.get("gate_passed") is not True
+            or official.get("llama_cpp_commit") != LLAMA_CPP_COMMIT
+            or official.get("binary_sha256", {}).get("server") != binary_hash):
+        raise RuntimeError("Missing or stale official backend checks")
+    path = STATUS_DIR / "gates" / model_key / f"deployment__{method}.json"
+    _archive_previous_gate(path, f"deployment__{method}_attempts")
+    attempt = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    prompts, identities, _ = _gate_prompts(model_key)
+    log = STATUS_DIR / "gate_logs" / "deployment" / model_key / method / f"{attempt}.jsonl"
+    record = {
+        "gate": "deployment_operational_check", "protocol_version": PROTOCOL_VERSION,
+        "attempt_id": attempt, "model_key": model_key, "method": method,
+        "deployment_check_policy_sha256": deployment_check_policy_sha256(),
+        "artifact_sha256": artifact_hash, "server_binary_sha256": binary_hash,
+        "conversion_sha256": sha256_file(conversion_path),
+        "manifest_sha256": sha256_file(manifest_path),
+        "official_backend_tests_sha256": sha256_file(official_path),
+        "test_data_used": False, "gate_passed": False,
+        "scope": "target CUDA runtime viability only; no CPU/CUDA equivalence or task-quality claim",
+    }
+    atomic_write_json(path, record)
+    try:
+        with LlamaServer(binaries["server"], artifact, log, gpu=gpu, slots=1, cuda=True) as server:
+            inputs = [server.tokenize(prompt, add_special=True) for prompt in prompts]
+            tokens = _server_tokens(server, inputs)
+            finite_rows = [_server_next_token_logprobs(server, ids, seed=20260918+i)
+                           for i, ids in enumerate(inputs)]
+            for row in finite_rows:
+                _reference_logprob_agreement(row, row)
+            if len(inputs) != len(TRAIN_GATE_INDICES) or any(not ids for ids in inputs):
+                raise RuntimeError("Incomplete deployment-check prompts")
+        record.update(server_resources=server.resource_record(), train_prompts=identities,
+                      input_token_ids=inputs, continuation_token_ids=tokens,
+                      first_position_top_logprobs=finite_rows, gate_passed=True)
+    except Exception as exc:
+        record["error"] = f"{type(exc).__name__}: {exc}"
+        atomic_write_json(path, record)
+        raise
+    atomic_write_json(path, record)
+    return record
 
 
 def packed_backend_gate(

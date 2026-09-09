@@ -22,6 +22,7 @@ from experiments.deployment_gguf.benchmark import (
 from experiments.deployment_gguf.gates import (
     conversion_gate,
     packed_backend_gate,
+    deployment_check,
     run_official_backend_tests,
 )
 from experiments.deployment_gguf.gguf_manifest import (
@@ -42,7 +43,7 @@ from experiments.deployment_gguf.protocol import (
     OUT,
     atomic_write_json,
     conversion_gate_policy_sha256,
-    packed_gate_policy_sha256,
+    deployment_check_policy_sha256,
     protocol_lock,
     sha256_file,
 )
@@ -73,11 +74,11 @@ def readiness(stage: str) -> dict:
             errors.append(f"missing or failed {model_set}")
         for method in METHODS:
             manifest = STATUS_DIR.parent / "manifests" / "artifacts" / model / f"{method}.json"
-            gate = STATUS_DIR / "gates" / model / f"packed__{method}.json"
+            gate = STATUS_DIR / "gates" / model / f"deployment__{method}.json"
             if gate.is_file() and json.loads(gate.read_text(encoding="utf-8")).get(
-                "packed_gate_policy_sha256"
-            ) != packed_gate_policy_sha256():
-                errors.append(f"obsolete packed gate policy {gate}")
+                "deployment_check_policy_sha256"
+            ) != deployment_check_policy_sha256():
+                errors.append(f"obsolete deployment check policy {gate}")
             for path in (manifest, gate):
                 if not path.is_file():
                     errors.append(f"missing {path}")
@@ -217,6 +218,11 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--model", choices=model_choices, required=True)
     p.add_argument("--llama-cpp-dir", type=Path, required=True)
     p.add_argument("--gpu", type=int, required=True)
+    p = sub.add_parser("deployment-check")
+    p.add_argument("--model", choices=model_choices, required=True)
+    p.add_argument("--method", choices=METHODS, required=True)
+    p.add_argument("--llama-cpp-dir", type=Path, required=True)
+    p.add_argument("--gpu", type=int, required=True)
     p = sub.add_parser("packed-gate")
     p.add_argument("--model", choices=model_choices, required=True)
     p.add_argument("--method", choices=METHODS, required=True)
@@ -275,6 +281,8 @@ def main() -> None:
         result = run_official_backend_tests(args.llama_cpp_dir)
     elif args.command == "conversion-gate":
         result = conversion_gate(args.model, args.llama_cpp_dir, gpu=args.gpu)
+    elif args.command == "deployment-check":
+        result = deployment_check(args.model, args.method, args.llama_cpp_dir, gpu=args.gpu)
     elif args.command == "packed-gate":
         result = packed_backend_gate(args.model, args.method, args.llama_cpp_dir, gpu=args.gpu)
     elif args.command == "packed-diagnostic":

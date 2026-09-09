@@ -27,29 +27,25 @@ The scientific contract is in `protocol_lock.json`. In particular:
   greedy, 256-token protocol;
 - engineering, value-pilot, and formal process blocks live in different paths;
 - test evaluation is impossible through the CLI until conversion, artifact, and
-  CPU-vs-CUDA packed-backend gates have passed.
+  target-CUDA deployment checks have passed.
 
-Both conversion and packed gates compare all 8 x 16 positions on identical
-token histories. Packed policy v2 uses each artifact's CPU-greedy reference,
-requires top-8 overlap >= 7 and critical decision-gap errors <= 0.10, and permits
-a top-1 swap only for mutual top-two candidates with both margins <= 0.10.
-Non-finite values and missing critical candidates fail. Free-running counts
-remain diagnostics, with complete token sequences and zero-based first divergence
-positions. These full-prefix re-prefill checks do not establish incremental
-KV-cache equivalence; deployment task quality is measured separately.
+Deployment eligibility is now separated from cross-backend numerical diagnostics.
+`deployment-check` retains artifact, conversion and official-check provenance,
+then runs eight fixed train prompts on CUDA with FA on. It requires complete
+16-token continuations and finite first-position top-8 values. This is a runtime
+smoke check, not a proof of kernel equivalence or task quality. Benchmarking and
+quality collection require this separate `deployment__<method>.json` record.
 
-Packed records carry a policy hash checked by benchmark, quality, and stage
-progression. Rerun every packed gate after updating to v2. Old records are saved
-in `outputs/status/gates/<model>/packed__<method>_attempts/`; new server logs use
-unique attempt directories. Existing artifacts and conversion records are reusable
-when their existing provenance checks pass.
+CPU/CUDA and FA comparisons remain optional diagnostics with their original
+thresholds and failed records. They no longer block cost or quality measurement.
+No previously failed record is relabeled as passing. See
+[methodology_review.md](methodology_review.md) for evidence and limitations.
 
-To rerun the engineering gate on the server (GPU 0):
+To prepare engineering artifacts for measurement, reuse existing audited GGUFs:
 
 ```bash
-python -m unittest experiments.deployment_gguf.test_deployment_gguf
 for method in fp16 q4 q5 sg; do
-  python -m experiments.deployment_gguf.run packed-gate \
+  python -m experiments.deployment_gguf.run deployment-check \
     --model qwen05 --method "$method" --gpu 0 \
     --llama-cpp-dir /data/experiment/LQ/llama.cpp-deployment-gguf-v1 || break
 done
@@ -151,7 +147,7 @@ a resumable-looking final artifact.
 
 Generate, syntax-check, and launch the stage in tmux. GPU 1 is reserved for
 timing because it normally has no desktop allocation; GPU 0 is reserved for
-conversion/packed gates and later quality evaluation. The generator rejects a
+conversion/deployment checks and later quality evaluation. The generator rejects a
 plan that assigns both roles to the same GPU. Stop any other GPU job first.
 
 ```bash

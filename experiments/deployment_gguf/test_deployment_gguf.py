@@ -33,6 +33,7 @@ from experiments.deployment_gguf.protocol import (
     REQUIRED_CMAKE_TOOLCHAIN,
     conversion_gate_policy_sha256,
     packed_gate_policy_sha256,
+    deployment_check_policy_sha256,
     protocol_lock,
     quantization_policy_sha256,
 )
@@ -166,9 +167,11 @@ class ProtocolTests(unittest.TestCase):
                 "gate_passed": True, "model_key": "qwen05",
                 "conversion_gate_policy_sha256": conversion_gate_policy_sha256(),
                 "server_binary_sha256": "hash",
+                "fp16_artifact_sha256": "hash",
             }))
             manifest = root / "manifest.json"
-            manifest.write_text(json.dumps({"gate_passed": True}))
+            manifest.write_text(json.dumps({"gate_passed": True, "model_key": "qwen05",
+                                            "method": "fp16", "artifact_sha256": "hash"}))
             cpu, cuda = mock.MagicMock(), mock.MagicMock()
             for server in (cpu, cuda):
                 server.__enter__.return_value = server
@@ -194,6 +197,21 @@ class ProtocolTests(unittest.TestCase):
                 for name, value in patches.items():
                     stack.enter_context(mock.patch.object(gates, name, value))
                 record = gates.packed_backend_gate("qwen05", "fp16", root, gpu=0)
+                old_bytes = old_path.read_bytes()
+                with mock.patch.object(gates, "LlamaServer", return_value=cuda), mock.patch.object(
+                    gates, "_server_tokens", return_value=[[11]*16]*8
+                ):
+                    operational = gates.deployment_check("qwen05", "fp16", root, gpu=0)
+                    self.assertTrue(operational["gate_passed"])
+                    self.assertEqual(old_path.read_bytes(), old_bytes)
+                    with mock.patch.object(gates, "_server_next_token_logprobs", return_value={
+                        **right, 0: float("nan")
+                    }):
+                        with self.assertRaisesRegex(RuntimeError, "non-finite"):
+                            gates.deployment_check("qwen05", "fp16", root, gpu=0)
+                    failed = json.loads((gate_dir / "deployment__fp16.json").read_text())
+                    self.assertFalse(failed["gate_passed"])
+                    self.assertEqual(old_path.read_bytes(), old_bytes)
             self.assertTrue(record["gate_passed"])
             self.assertFalse(record["cpu_vs_cuda_continuation"]["passed"])
             self.assertEqual(record["packed_gate_policy_sha256"], packed_gate_policy_sha256())
@@ -425,7 +443,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn("unset CUDA_VISIBLE_DEVICES GGML_CUDA_DISABLE_GRAPHS", value)
         self.assertIn("export CUDA_DEVICE_ORDER=PCI_BUS_ID", value)
         self.assertLess(
-            value.index("packed-gate --model smollm"),
+            value.index("deployment-check --model smollm"),
             value.index("quality --model qwen15"),
         )
         self.assertEqual(set(balanced_methods(0)), {"fp16", "q4", "q5", "sg"})
@@ -740,14 +758,14 @@ class ProtocolTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            (gate_dir / "packed__q4.json").write_text(
+            (gate_dir / "deployment__q4.json").write_text(
                 json.dumps(
                     {
                         "gate_passed": True,
                         "model_key": "qwen05",
                         "method": "q4",
                         "artifact_sha256": "a",
-                        "packed_gate_policy_sha256": packed_gate_policy_sha256(),
+                        "deployment_check_policy_sha256": deployment_check_policy_sha256(),
                     }
                 ),
                 encoding="utf-8",
@@ -769,9 +787,9 @@ class ProtocolTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "hashes disagree"):
                     quality.require_quality_gates("qwen05", "q4")
                 for check in (quality.require_quality_gates, benchmark._require_benchmark_gate):
-                    packed_path = gate_dir / "packed__q4.json"
+                    packed_path = gate_dir / "deployment__q4.json"
                     packed_record = json.loads(packed_path.read_text())
-                    packed_record["packed_gate_policy_sha256"] = "obsolete"
+                    packed_record["deployment_check_policy_sha256"] = "obsolete"
                     packed_path.write_text(json.dumps(packed_record))
                     with mock.patch.object(benchmark, "STATUS_DIR", root), mock.patch.object(
                         benchmark, "artifact_manifest_path", return_value=manifest
@@ -797,7 +815,7 @@ class ProtocolTests(unittest.TestCase):
                 json.dumps({"gate_passed": False, "model_key": "qwen05"}),
                 encoding="utf-8",
             )
-            (gate_dir / "packed__q4.json").write_text(
+            (gate_dir / "deployment__q4.json").write_text(
                 json.dumps(common), encoding="utf-8"
             )
             manifest.write_text(json.dumps(common), encoding="utf-8")

@@ -114,6 +114,10 @@ def packed_gate_policy_sha256() -> str:
     return json_sha256(protocol_lock()["gates"]["packed_backend"])
 
 
+def deployment_check_policy_sha256() -> str:
+    return json_sha256(protocol_lock()["gates"]["deployment_check"])
+
+
 def atomic_write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(

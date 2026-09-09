@@ -100,7 +100,7 @@ def build_plan(
         for method in METHODS:
             lines.append(
                 command(
-                    "packed-gate",
+                    "deployment-check",
                     "--model",
                     model,
                     "--method",

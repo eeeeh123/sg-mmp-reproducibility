@@ -35,7 +35,7 @@ from experiments.deployment_gguf.protocol import (
     atomic_write_json,
     binary_paths,
     conversion_gate_policy_sha256,
-    packed_gate_policy_sha256,
+    deployment_check_policy_sha256,
     sha256_file,
 )
 from experiments.deployment_gguf.quality import load_prompts
@@ -97,7 +97,7 @@ def prepare_workload(model_key: str) -> dict:
 
 def _require_benchmark_gate(model_key: str, method: str) -> tuple[dict, dict]:
     conversion = STATUS_DIR / "gates" / model_key / "conversion.json"
-    gate = STATUS_DIR / "gates" / model_key / f"packed__{method}.json"
+    gate = STATUS_DIR / "gates" / model_key / f"deployment__{method}.json"
     manifest = artifact_manifest_path(model_key, method)
     records = []
     for path in (conversion, gate, manifest):
@@ -108,8 +108,8 @@ def _require_benchmark_gate(model_key: str, method: str) -> tuple[dict, dict]:
             raise RuntimeError(f"Benchmark locked until gate passes: {path}")
         records.append(record)
     conversion_record, gate_record, manifest_record = records
-    if gate_record.get("packed_gate_policy_sha256") != packed_gate_policy_sha256():
-        raise RuntimeError("Packed gate belongs to an obsolete gate policy")
+    if gate_record.get("deployment_check_policy_sha256") != deployment_check_policy_sha256():
+        raise RuntimeError("Deployment check belongs to an obsolete gate policy")
     if conversion_record.get("model_key") != model_key:
         raise RuntimeError("Conversion gate belongs to another model")
     if (
@@ -121,14 +121,14 @@ def _require_benchmark_gate(model_key: str, method: str) -> tuple[dict, dict]:
         gate_record.get("model_key") != model_key
         or gate_record.get("method") != method
     ):
-        raise RuntimeError("Packed gate belongs to another model or method")
+        raise RuntimeError("Deployment check belongs to another model or method")
     if (
         manifest_record.get("model_key") != model_key
         or manifest_record.get("method") != method
     ):
         raise RuntimeError("Artifact manifest belongs to another model or method")
     if gate_record.get("artifact_sha256") != manifest_record.get("artifact_sha256"):
-        raise RuntimeError("Packed gate and artifact manifest hashes disagree")
+        raise RuntimeError("Deployment check and artifact manifest hashes disagree")
     return manifest_record, gate_record
 
 
@@ -364,7 +364,7 @@ def benchmark_service(
     server_binary_sha256 = sha256_file(binaries["server"])
     if gate_record.get("server_binary_sha256") != server_binary_sha256:
         raise RuntimeError(
-            "Benchmark server binary differs from the binary that passed the packed gate"
+            "Benchmark server binary differs from the binary that passed the deployment check"
         )
     output = BENCH_DIR / "blocks" / "service" / phase / model_key / method / f"block_{block:03d}.json"
     if output.is_file():

@@ -23,7 +23,7 @@ from experiments.deployment_gguf.protocol import (
     atomic_write_json,
     binary_paths,
     conversion_gate_policy_sha256,
-    packed_gate_policy_sha256,
+    deployment_check_policy_sha256,
     json_sha256,
     sha256_file,
 )
@@ -121,7 +121,7 @@ def require_quality_gates(model_key: str, method: str) -> dict:
     gate_dir = STATUS_DIR / "gates" / model_key
     required = [
         gate_dir / "conversion.json",
-        gate_dir / f"packed__{method}.json",
+        gate_dir / f"deployment__{method}.json",
         artifact_manifest_path(model_key, method),
     ]
     records = {}
@@ -133,8 +133,8 @@ def require_quality_gates(model_key: str, method: str) -> dict:
             raise RuntimeError(f"Quality is locked by failed gate: {path}")
         records[path] = record
     conversion, packed, manifest = (records[path] for path in required)
-    if packed.get("packed_gate_policy_sha256") != packed_gate_policy_sha256():
-        raise RuntimeError("Packed gate belongs to an obsolete gate policy")
+    if packed.get("deployment_check_policy_sha256") != deployment_check_policy_sha256():
+        raise RuntimeError("Deployment check belongs to an obsolete gate policy")
     if conversion.get("model_key") != model_key:
         raise RuntimeError("Conversion gate belongs to another model")
     if (
@@ -143,11 +143,11 @@ def require_quality_gates(model_key: str, method: str) -> dict:
     ):
         raise RuntimeError("Conversion gate belongs to an obsolete gate policy")
     if packed.get("model_key") != model_key or packed.get("method") != method:
-        raise RuntimeError("Packed gate belongs to another model or method")
+        raise RuntimeError("Deployment check belongs to another model or method")
     if manifest.get("model_key") != model_key or manifest.get("method") != method:
         raise RuntimeError("Artifact manifest belongs to another model or method")
     if packed.get("artifact_sha256") != manifest.get("artifact_sha256"):
-        raise RuntimeError("Packed gate and artifact manifest hashes disagree")
+        raise RuntimeError("Deployment check and artifact manifest hashes disagree")
     return {"conversion": conversion, "packed": packed, "manifest": manifest}
 
 
