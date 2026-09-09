@@ -57,6 +57,33 @@ done
 
 ## What is measured
 
+### Diagnose CPU/CUDA discrepancies without changing gate policy
+
+After a packed gate (passed or failed), run:
+
+```bash
+python -m experiments.deployment_gguf.run packed-diagnostic \
+  --model qwen05 --method q4 --gpu 0 \
+  --llama-cpp-dir /data/experiment/LQ/llama.cpp-deployment-gguf-v1
+```
+
+This reuses the saved effective token IDs, CPU continuation, and CPU top-8
+distributions. The artifact and server binary hashes must match the source gate.
+Three separate server processes run CUDA FA on, on again, and off, each querying
+all 128 identical-history positions. It does not load task test data or rerun
+artifact construction. Default FA settings of gates and benchmarks are unchanged.
+
+The command prints compact summaries for CPU versus each CUDA run, CUDA on
+repeatability, and CUDA on versus off. Full distributions, comparison rows,
+server commands/resources, logs, and a source-gate snapshot are written under
+`outputs/status/diagnostics/packed/<model>/<method>/<attempt>/`.
+`summary.json` stays incomplete if interrupted; each completed run is saved.
+No gate record is modified and no diagnostic result unlocks benchmarking or
+quality evaluation. Failure counts use the existing policy solely as a reference.
+Exact top-8 agreement does not establish full-vocabulary or cross-hardware
+determinism, and these re-prefill comparisons do not establish incremental
+KV-cache equivalence.
+
 The artifact audit writes a row for every stored tensor, including its original
 HF module (when eligible), GGUF name, shape, type, parameter count, payload
 bytes, selection status, and tied-output status. It reports four quantities

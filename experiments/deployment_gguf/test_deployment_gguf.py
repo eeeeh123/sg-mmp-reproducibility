@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from experiments.deployment_gguf import artifacts, benchmark, gates, quality
+from experiments.deployment_gguf import diagnostics
 from experiments.deployment_gguf.analyze import _exact_mcnemar, paired_ratio
 from experiments.deployment_gguf.gguf_manifest import (
     expected_type,
@@ -200,6 +201,54 @@ class ProtocolTests(unittest.TestCase):
             archives = list((gate_dir / "packed__fp16_attempts").glob("*.json"))
             self.assertEqual(len(archives), 1)
             self.assertFalse(json.loads(archives[0].read_text())["gate_passed"])
+
+    def test_diagnostic_preserves_gate_and_runs_three_fa_controls(self):
+        import tempfile
+        from experiments.deployment_gguf.llama_server import LlamaServer
+
+        for cuda, override, expected in ((True, None, "on"), (False, None, "off"),
+                                         (True, "off", "off")):
+            server = LlamaServer(Path("server"), Path("model"), Path("log"),
+                                 cuda=cuda, flash_attn=override)
+            self.assertEqual(server.command[server.command.index("--flash-attn") + 1], expected)
+        identities = [{"train_index": i, "effective_input_token_ids": [100],
+                       "cpu_token_ids": [10]*16} for i in gates.TRAIN_GATE_INDICES]
+        top = self._top8((10, -1.0), (11, -1.3))
+        rows = [[top]*16 for _ in identities]
+        teacher = gates._packed_teacher_agreement(rows, rows, identities)
+        record = {"model_key": "qwen05", "method": "q4", "tokenizer_passed": True,
+                  "gate_passed": False, "artifact_sha256": "hash",
+                  "server_binary_sha256": "hash",
+                  "packed_gate_policy_sha256": packed_gate_policy_sha256(),
+                  "train_prompts": identities, "teacher_forced_cpu_vs_cuda": teacher}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "gates" / "qwen05" / "packed__q4.json"
+            source.parent.mkdir(parents=True)
+            source.write_text(json.dumps(record))
+            original = source.read_bytes()
+            server = mock.MagicMock()
+            server.__enter__.return_value = server
+            server.resource_record.return_value = {"command": ["fake"]}
+            with ExitStack() as stack:
+                factory = stack.enter_context(mock.patch.object(diagnostics, "LlamaServer", return_value=server))
+                stack.enter_context(mock.patch.object(diagnostics, "STATUS_DIR", root))
+                stack.enter_context(mock.patch.object(diagnostics, "sha256_file", return_value="hash"))
+                query = stack.enter_context(mock.patch.object(diagnostics, "_teacher_forced_rows", return_value=rows))
+                result = diagnostics.packed_diagnostic("qwen05", "q4", root, gpu=0)
+            self.assertTrue(result["complete"])
+            self.assertNotIn("gate_passed", result)
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual([c.kwargs["flash_attn"] for c in factory.call_args_list], ["on", "on", "off"])
+            for call in query.call_args_list:
+                self.assertEqual(call.args[1], [[100]]*8)
+                self.assertEqual(call.args[2], [[10]*16]*8)
+            self.assertEqual(len(result["comparisons"]), 5)
+            self.assertEqual(result["comparisons"]["cuda_on_1__vs__cuda_on_2"]["exact_top8_rows"], 128)
+            self.assertTrue((Path(result["output_directory"]) / "summary.json").is_file())
+        record["teacher_forced_cpu_vs_cuda"]["rows"] = teacher["rows"][:-1]
+        with self.assertRaisesRegex(RuntimeError, "incomplete or reordered"):
+            diagnostics._saved_reference(record)
 
     def test_reference_logits_ignore_noncritical_tail_boundary(self):
         hf = self._top8((10, -1.00), (11, -1.30))

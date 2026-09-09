@@ -138,6 +138,7 @@ class LlamaServer:
         gpu: int = 0,
         slots: int = 1,
         cuda: bool = True,
+        flash_attn: str | None = None,
         context_per_slot: int = CONTEXT_TOKENS_PER_SLOT,
         startup_timeout: float = 300,
     ):
@@ -147,6 +148,9 @@ class LlamaServer:
         self.gpu = int(gpu)
         self.slots = int(slots)
         self.cuda = bool(cuda)
+        if flash_attn not in (None, "on", "off"):
+            raise ValueError("flash_attn must be on or off")
+        self.flash_attn = flash_attn or ("on" if self.cuda else "off")
         self.context_per_slot = int(context_per_slot)
         self.startup_timeout = float(startup_timeout)
         self.port = free_local_port()
@@ -193,7 +197,7 @@ class LlamaServer:
             "--n-gpu-layers",
             "all" if self.cuda else "0",
             "--flash-attn",
-            "on" if self.cuda else "off",
+            self.flash_attn,
         ]
         if not self.cuda:
             command.extend(["--device", "none"])

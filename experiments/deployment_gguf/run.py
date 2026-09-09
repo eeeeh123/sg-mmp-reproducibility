@@ -222,6 +222,11 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--method", choices=METHODS, required=True)
     p.add_argument("--llama-cpp-dir", type=Path, required=True)
     p.add_argument("--gpu", type=int, required=True)
+    p = sub.add_parser("packed-diagnostic")
+    p.add_argument("--model", choices=model_choices, required=True)
+    p.add_argument("--method", choices=METHODS, required=True)
+    p.add_argument("--llama-cpp-dir", type=Path, required=True)
+    p.add_argument("--gpu", type=int, required=True)
     p = sub.add_parser("prepare-workload")
     p.add_argument("--model", choices=model_choices, required=True)
     for name in ("benchmark-micro", "benchmark-service"):
@@ -272,6 +277,9 @@ def main() -> None:
         result = conversion_gate(args.model, args.llama_cpp_dir, gpu=args.gpu)
     elif args.command == "packed-gate":
         result = packed_backend_gate(args.model, args.method, args.llama_cpp_dir, gpu=args.gpu)
+    elif args.command == "packed-diagnostic":
+        from experiments.deployment_gguf.diagnostics import packed_diagnostic
+        result = packed_diagnostic(args.model, args.method, args.llama_cpp_dir, gpu=args.gpu)
     elif args.command == "prepare-workload":
         result = prepare_workload(args.model)
     elif args.command == "benchmark-micro":
