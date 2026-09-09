@@ -38,6 +38,14 @@
       "data_available_when_frozen": "toolchain and upstream diagnostic logs only; no converted deployment artifacts, performance measurements, or GSM8K deployment results existed",
       "scientific_scope": "replaces a generic randomized implementation diagnostic with artifact-specific validation; model definitions, workloads, endpoints, comparisons, stopping rules, and statistical analysis are unchanged",
       "status": "active"
+    },
+    {
+      "date": "2026-09-09",
+      "trigger": "The first engineering imatrix launch exited with SIGFPE before producing an importance matrix because the wrapper passed output-frequency=0 to an upstream modulo operation.",
+      "resolution": "Use the documented output frequency 10, retain the documented save frequency 0, and write to an incomplete GGUF path that is atomically promoted only after a successful nonempty result. Failed staging output is removed while the append-only command log is retained.",
+      "data_available_when_frozen": "the audited source FP16 GGUF artifact only; no importance matrix, quantized deployment artifact, performance measurement, or GSM8K deployment result existed",
+      "scientific_scope": "crash and partial-file repair only; calibration corpus, importance computation, quantization policy, workloads, endpoints, comparisons, stopping rules, and statistical analysis are unchanged",
+      "status": "active"
     }
   ],
   "source_weights": "Each artifact is independently quantized from the immutable high-precision checkpoint recorded by revision-full-v4; requantization is forbidden.",
@@ -83,6 +91,9 @@
     "samples_per_seed": 128,
     "tokens_per_sample": 2048,
     "sequence_boundary": "one model EOS token; 383 boundaries for 384 frozen sequences",
+    "output_frequency_chunks": 10,
+    "snapshot_save_frequency_chunks": 0,
+    "publication": "write to an incomplete GGUF path and atomically promote only after successful nonempty completion",
     "shared_across_methods_within_model": true,
     "test_data_used": false
   },

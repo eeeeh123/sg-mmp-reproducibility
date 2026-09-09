@@ -7,6 +7,7 @@ import struct
 import sys
 import types
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -24,6 +25,8 @@ from experiments.deployment_gguf.make_server_plan import (
     build_plan,
 )
 from experiments.deployment_gguf.protocol import (
+    IMATRIX_OUTPUT_FREQUENCY,
+    IMATRIX_SAVE_FREQUENCY,
     LLAMA_CPP_COMMIT,
     REQUIRED_CMAKE_TOOLCHAIN,
     protocol_lock,
@@ -81,6 +84,76 @@ class ProtocolTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             hf_to_gguf_tensor("model.embed_tokens")
+
+    def test_imatrix_uses_nonzero_output_frequency_and_atomic_publication(self):
+        root = Path(__file__).parent / f".test-{os.getpid()}-imatrix"
+        manifest_dir = root / "manifests"
+        corpus = root / "calibration.txt"
+        output = root / "calibration" / "qwen05" / "imatrix.gguf"
+        fp16 = root / "qwen05-fp16.gguf"
+        binary = root / "llama-imatrix"
+        corpus_manifest = manifest_dir / "calibration" / "qwen05__corpus.json"
+        try:
+            corpus_manifest.parent.mkdir(parents=True)
+            corpus_manifest.write_text("{}", encoding="utf-8")
+            corpus.write_text("training text", encoding="utf-8")
+            fp16.write_bytes(b"fp16")
+            binary.write_bytes(b"imatrix-binary")
+
+            def fake_run(command, _log_path, *, env):
+                self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "0")
+                output_frequency = command[command.index("--output-frequency") + 1]
+                save_frequency = command[command.index("--save-frequency") + 1]
+                self.assertEqual(output_frequency, str(IMATRIX_OUTPUT_FREQUENCY))
+                self.assertNotEqual(output_frequency, "0")
+                self.assertEqual(save_frequency, str(IMATRIX_SAVE_FREQUENCY))
+                staging = Path(command[command.index("--output") + 1])
+                self.assertEqual(staging.name, "imatrix.incomplete.gguf")
+                self.assertNotEqual(staging, output)
+                staging.parent.mkdir(parents=True, exist_ok=True)
+                staging.write_bytes(b"complete-imatrix")
+
+            patches = (
+                mock.patch.object(artifacts, "MANIFEST_DIR", manifest_dir),
+                mock.patch.object(artifacts, "require_llama_cpp"),
+                mock.patch.object(
+                    artifacts, "calibration_corpus_path", return_value=corpus
+                ),
+                mock.patch.object(artifacts, "imatrix_path", return_value=output),
+                mock.patch.object(artifacts, "source_fp16_path", return_value=fp16),
+                mock.patch.object(
+                    artifacts, "binary_paths", return_value={"imatrix": binary}
+                ),
+                mock.patch.object(artifacts, "_run_logged", side_effect=fake_run),
+            )
+            with ExitStack() as stack:
+                for patch in patches[:-1]:
+                    stack.enter_context(patch)
+                run_mock = stack.enter_context(patches[-1])
+                record = artifacts.build_imatrix("qwen05", root, gpu=0)
+                self.assertEqual(output.read_bytes(), b"complete-imatrix")
+                staging = output.with_name("imatrix.incomplete.gguf")
+                self.assertFalse(staging.exists())
+                self.assertEqual(
+                    record["imatrix_sha256"], artifacts.sha256_file(output)
+                )
+
+                output.unlink()
+                (manifest_dir / "calibration" / "qwen05__imatrix.json").unlink()
+
+                def fail_after_partial(command, _log_path, *, env):
+                    del env
+                    partial = Path(command[command.index("--output") + 1])
+                    partial.write_bytes(b"partial")
+                    raise RuntimeError("simulated failure")
+
+                run_mock.side_effect = fail_after_partial
+                with self.assertRaisesRegex(RuntimeError, "simulated failure"):
+                    artifacts.build_imatrix("qwen05", root, gpu=0)
+                self.assertFalse(staging.exists())
+                self.assertFalse(output.exists())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_minimal_gguf_parser_accounts_payloads(self):
         path = Path(__file__).parent / f".test-{os.getpid()}-tiny.gguf"

@@ -21,6 +21,8 @@ from experiments.deployment_gguf.protocol import (
     CALIB_SAMPLES,
     CALIB_SEEDS,
     CPU_THREADS,
+    IMATRIX_OUTPUT_FREQUENCY,
+    IMATRIX_SAVE_FREQUENCY,
     LLAMA_CPP_COMMIT,
     MANIFEST_DIR,
     MODEL_SPECS,
@@ -501,6 +503,10 @@ def build_imatrix(
     if output.exists():
         output.unlink()
     output.parent.mkdir(parents=True, exist_ok=True)
+    staging_output = output.with_name(
+        f"{output.stem}.incomplete{output.suffix}"
+    )
+    staging_output.unlink(missing_ok=True)
     binaries = binary_paths(llama_cpp_dir)
     command = [
         str(binaries["imatrix"]),
@@ -509,7 +515,7 @@ def build_imatrix(
         "--file",
         str(corpus),
         "--output",
-        str(output),
+        str(staging_output),
         "--no-ppl",
         "--ctx-size",
         str(CALIB_LENGTH),
@@ -518,18 +524,25 @@ def build_imatrix(
         "--n-gpu-layers",
         "all",
         "--output-frequency",
-        "0",
+        str(IMATRIX_OUTPUT_FREQUENCY),
         "--save-frequency",
-        "0",
+        str(IMATRIX_SAVE_FREQUENCY),
         "--parse-special",
     ]
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu)
-    _run_logged(
-        command,
-        MANIFEST_DIR / "build_logs" / f"{model_key}__imatrix.log",
-        env=env,
-    )
+    try:
+        _run_logged(
+            command,
+            MANIFEST_DIR / "build_logs" / f"{model_key}__imatrix.log",
+            env=env,
+        )
+        if not staging_output.is_file() or staging_output.stat().st_size == 0:
+            raise RuntimeError("llama-imatrix completed without a nonempty output")
+        os.replace(staging_output, output)
+    except BaseException:
+        staging_output.unlink(missing_ok=True)
+        raise
     record = {
         "protocol_version": PROTOCOL_VERSION,
         "model_key": model_key,

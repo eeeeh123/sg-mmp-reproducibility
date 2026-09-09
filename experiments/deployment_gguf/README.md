@@ -85,6 +85,10 @@ bash experiments/deployment_gguf/bootstrap_llama_cpp.sh \
 The experiment plan itself unsets network proxies and fails unless the checkout
 is clean at commit `050dde50c9d70cf207db84f7224eedc491d817b2`, both RTX 3090-class
 GPUs are visible, the CUDA binaries exist, and at least 40 GiB is free.
+The imatrix builder uses the documented output frequency of 10 chunks; zero is
+valid only for the snapshot-save frequency. It writes an incomplete GGUF first
+and atomically publishes it after successful completion so a crash cannot leave
+a resumable-looking final artifact.
 
 ## Stage 1: engineering pilot (Qwen-0.5B, no test data)
 
