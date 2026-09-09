@@ -17,6 +17,13 @@
   },
   "pretest_amendments": [
     {
+      "date": "2026-09-09",
+      "trigger": "User-reported qwen05 FP16 CPU/CUDA free-running gate matched 7/8 first tokens and 112/128 aligned tokens. Aggregate counts alone do not establish near-tie causality.",
+      "resolution": "Replace packed free-running eligibility with identical-token-history CPU/CUDA top-8 checks at all 128 positions, using the existing conversion decision-gap and near-tie bounds. Preserve continuation sequences, first divergence positions, prior attempts, and policy hashes. Reject obsolete packed evidence downstream.",
+      "data_available_when_frozen": "Reported train-only FP16 packed gate diagnostic; no new server experiments or deployment test results were inspected for this amendment.",
+      "scientific_scope": "Full-prefix re-prefill backend agreement only; this does not establish incremental KV-cache equivalence. Task quality remains separately measured; no method or workload is changed."
+    },
+    {
       "date": "2026-09-08",
       "trigger": "The initial CUDA 11.6 build produced an intermittent boundary-tolerance failure in the pinned backend ADD test before any deployment artifact or task-quality row was generated.",
       "resolution": "Freeze CUDA Toolkit 12.4 with GCC/G++ 12 and require five consecutive ADD executions plus one complete backend execution on each physical RTX 3090, followed by the quantization-function test.",
@@ -200,7 +207,9 @@
     "packed_backend": {
       "official_tests": "With CUDA Toolkit 12.4 and G++ 12, test-quantize-fns must pass strictly before artifact construction. The randomized generic test-backend-ops suite is not an experimental eligibility gate; its earlier attempts remain preserved as diagnostics and no numerical exception is active.",
       "data": "the same eight fixed GSM8K-train prompts; test is never loaded",
-      "continuation": "CPU versus CUDA for every packed artifact: 8/8 first generated tokens and at least 126/128 aligned greedy continuation tokens match",
+      "policy_version": 2,
+      "continuation": "Diagnostic only: retain 8/8 first-token and 126/128 aligned-token reference thresholds, full CPU/CUDA token sequences and zero-based first divergence positions; these do not determine eligibility.",
+      "teacher_forced": "Require identical effective prompt token IDs including special tokens. On each artifact's CPU-greedy reference history, compare both backends at all 8 x 16 positions by one-step full-prefix re-prefill with EOS unsuppressed. Require finite top-8 log-probabilities, overlap >=7, both top-two candidate sets present in both rows, and maximum critical log-probability gap difference <=0.10. Top-1 must agree unless both winning candidates are in both top-two sets and both margins <=0.10. No incremental KV-cache equivalence claim is made.",
       "thresholds_frozen_before_test": true
     },
     "artifact": "Every tensor mapping/type/size audit passes and provenance hashes are complete.",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import gc
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -24,6 +25,7 @@ from experiments.deployment_gguf.protocol import (
     atomic_write_json,
     binary_paths,
     conversion_gate_policy_sha256,
+    packed_gate_policy_sha256,
     sha256_file,
 )
 from experiments.deployment_gguf.quality import load_prompts
@@ -128,6 +130,8 @@ def _reference_logprob_agreement(
 ) -> dict:
     if len(hf_row) != LOGPROB_TOP_K or len(gguf_row) != LOGPROB_TOP_K:
         raise RuntimeError("Reference-logit gate requires two complete top-8 rows")
+    if not all(math.isfinite(value) for value in (*hf_row.values(), *gguf_row.values())):
+        raise RuntimeError("Reference-logit gate received non-finite log-probabilities")
     hf_ranked = sorted(hf_row, key=hf_row.get, reverse=True)
     gguf_ranked = sorted(gguf_row, key=gguf_row.get, reverse=True)
     common = sorted(set(hf_row) & set(gguf_row))
@@ -563,6 +567,49 @@ def run_official_backend_tests(llama_cpp_dir: Path) -> dict:
     return record
 
 
+def _teacher_forced_rows(server, inputs, references):
+    return [
+        [
+            _server_next_token_logprobs(
+                server, input_ids + reference[:step],
+                seed=20260918 + offset * TOKENS_PER_PROMPT + step,
+            )
+            for step in range(TOKENS_PER_PROMPT)
+        ]
+        for offset, (input_ids, reference) in enumerate(zip(inputs, references))
+    ]
+
+
+def _packed_teacher_agreement(cpu_rows, cuda_rows, identities):
+    if len(cpu_rows) != len(TRAIN_GATE_INDICES) or len(cuda_rows) != len(cpu_rows):
+        raise RuntimeError("Packed teacher-forced prompt count mismatch")
+    if len(identities) != len(cpu_rows):
+        raise RuntimeError("Packed teacher-forced identity count mismatch")
+    rows = []
+    for identity, left, right in zip(identities, cpu_rows, cuda_rows):
+        if len(left) != TOKENS_PER_PROMPT or len(right) != TOKENS_PER_PROMPT:
+            raise RuntimeError("Packed teacher-forced position count mismatch")
+        for step, (cpu, cuda) in enumerate(zip(left, right)):
+            comparison = _reference_logprob_agreement(cpu, cuda)
+            row = {
+                key.replace("hf_", "cpu_").replace("gguf_", "cuda_"): value
+                for key, value in comparison.items()
+            }
+            row.update(train_index=identity["train_index"], continuation_step=step)
+            rows.append(row)
+    return {
+        "conditioning": "identical CPU-greedy reference histories as token IDs",
+        "execution_scope": "one-step full-prefix re-prefill; incremental KV-cache equivalence is not established",
+        "top_k": LOGPROB_TOP_K,
+        "minimum_top_k_overlap": MIN_LOGPROB_TOP_K_OVERLAP,
+        "maximum_critical_logprob_gap_absolute_error": MAX_CRITICAL_LOGPROB_GAP_ERROR,
+        "near_tie_max_top1_margin": NEAR_TIE_MAX_MARGIN,
+        "positions": len(rows),
+        "rows": rows,
+        "passed": all(row["passed"] for row in rows),
+    }
+
+
 def packed_backend_gate(
     model_key: str, method: str, llama_cpp_dir: Path, *, gpu: int
 ) -> dict:
@@ -607,45 +654,67 @@ def packed_backend_gate(
     ):
         raise RuntimeError("llama-server binary changed after conversion gate")
     artifact = artifact_path(model_key, method)
+    path = STATUS_DIR / "gates" / model_key / f"packed__{method}.json"
+    _archive_previous_gate(path, f"packed__{method}_attempts")
+    attempt_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    log_dir = STATUS_DIR / "gate_logs" / "packed" / model_key / method / attempt_id
     with LlamaServer(
         binaries["server"],
         artifact,
-        STATUS_DIR / "gate_logs" / f"{model_key}__{method}__cpu.jsonl",
+        log_dir / "cpu.jsonl",
         gpu=gpu,
         slots=1,
         cuda=False,
         startup_timeout=600,
     ) as cpu_server:
-        cpu_tokens = _server_tokens(cpu_server, prompts)
+        inputs = [cpu_server.tokenize(prompt, add_special=True) for prompt in prompts]
+        cpu_tokens = _server_tokens(cpu_server, inputs)
+        cpu_rows = _teacher_forced_rows(cpu_server, inputs, cpu_tokens)
     cpu_resources = cpu_server.resource_record()
     with LlamaServer(
         binaries["server"],
         artifact,
-        STATUS_DIR / "gate_logs" / f"{model_key}__{method}__cuda.jsonl",
+        log_dir / "cuda.jsonl",
         gpu=gpu,
         slots=1,
         cuda=True,
     ) as cuda_server:
-        cuda_tokens = _server_tokens(cuda_server, prompts)
+        cuda_inputs = [cuda_server.tokenize(prompt, add_special=True) for prompt in prompts]
+        cuda_tokens = _server_tokens(cuda_server, inputs)
+        cuda_rows = _teacher_forced_rows(cuda_server, inputs, cpu_tokens)
     cuda_resources = cuda_server.resource_record()
 
     agreement = _continuation_agreement(cpu_tokens, cuda_tokens)
+    agreement["gate_role"] = "diagnostic only; not an eligibility condition"
+    teacher = _packed_teacher_agreement(cpu_rows, cuda_rows, identities)
+    for identity, input_ids, cpu, cuda in zip(identities, inputs, cpu_tokens, cuda_tokens):
+        identity.update(
+            effective_input_token_ids=input_ids,
+            cpu_token_ids=cpu,
+            cuda_token_ids=cuda,
+            first_divergence_step=next(
+                (step for step, (a, b) in enumerate(zip(cpu, cuda)) if a != b), None
+            ),
+        )
     record = {
         "protocol_version": PROTOCOL_VERSION,
         "gate": "packed_backend",
+        "attempt_id": attempt_id,
+        "packed_gate_policy_sha256": packed_gate_policy_sha256(),
         "model_key": model_key,
         "method": method,
         "test_data_used": False,
         "train_prompts": identities,
         "cpu_vs_cuda_continuation": agreement,
+        "tokenizer_passed": inputs == cuda_inputs,
+        "teacher_forced_cpu_vs_cuda": teacher,
         "artifact_sha256": sha256_file(artifact),
         "server_binary_sha256": sha256_file(binaries["server"]),
         "official_backend_tests_sha256": sha256_file(official_path),
         "cpu_resources": cpu_resources,
         "cuda_resources": cuda_resources,
-        "gate_passed": agreement["passed"],
+        "gate_passed": inputs == cuda_inputs and teacher["passed"],
     }
-    path = STATUS_DIR / "gates" / model_key / f"packed__{method}.json"
     atomic_write_json(path, record)
     if not record["gate_passed"]:
         raise RuntimeError(f"Packed CPU/CUDA gate failed; inspect {path}")

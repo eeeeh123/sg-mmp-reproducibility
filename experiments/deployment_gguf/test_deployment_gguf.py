@@ -31,6 +31,7 @@ from experiments.deployment_gguf.protocol import (
     LLAMA_CPP_COMMIT,
     REQUIRED_CMAKE_TOOLCHAIN,
     conversion_gate_policy_sha256,
+    packed_gate_policy_sha256,
     protocol_lock,
     quantization_policy_sha256,
 )
@@ -115,6 +116,90 @@ class ProtocolTests(unittest.TestCase):
         self.assertFalse(row["same_top1"])
         self.assertTrue(row["explained_near_tie"])
         self.assertTrue(row["passed"])
+
+    def test_packed_same_history_is_independent_of_free_running_cascade(self):
+        cpu = self._top8((10, -1.00), (11, -1.04))
+        cuda = self._top8((11, -1.01), (10, -1.03))
+        identities = [{"train_index": i} for i in gates.TRAIN_GATE_INDICES]
+        left = [[cpu] * 16 for _ in identities]
+        right = [[cuda] * 16 for _ in identities]
+        check = gates._packed_teacher_agreement(left, right, identities)
+        self.assertTrue(check["passed"])
+        self.assertEqual(check["positions"], 128)
+        self.assertIn("cpu_top1_id", check["rows"][0])
+        self.assertFalse(gates._continuation_agreement([[10]*16]*8, [[11]*16]*8)["passed"])
+        right[0] = [self._top8((11, -1.0), (10, -1.8))] + [cuda]*15
+        self.assertFalse(gates._packed_teacher_agreement(left, right, identities)["passed"])
+        with self.assertRaises(RuntimeError):
+            gates._packed_teacher_agreement(left[:-1], right, identities)
+
+    def test_packed_teacher_queries_use_reference_token_ids(self):
+        server = mock.Mock()
+        with mock.patch.object(gates, "_server_next_token_logprobs", return_value={}) as query:
+            gates._teacher_forced_rows(server, [[100, 101]], [list(range(16))])
+        self.assertEqual(query.call_count, 16)
+        for step, call in enumerate(query.call_args_list):
+            self.assertEqual(call.args[1], [100, 101] + list(range(step)))
+
+    def test_reference_logits_reject_nonfinite_values(self):
+        row = self._top8((10, -1.0), (11, -1.3))
+        for value in (float("nan"), float("inf"), float("-inf")):
+            bad = {**row, 0: value}
+            with self.assertRaisesRegex(RuntimeError, "non-finite"):
+                gates._reference_logprob_agreement(row, bad)
+
+    def test_packed_gate_wires_teacher_result_and_archives_failure(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            gate_dir = root / "gates" / "qwen05"
+            gate_dir.mkdir(parents=True)
+            old_path = gate_dir / "packed__fp16.json"
+            old_path.write_text(json.dumps({"gate_passed": False}))
+            (root / "gates" / "official_backend_tests.json").write_text(json.dumps({
+                "gate_passed": True, "llama_cpp_commit": LLAMA_CPP_COMMIT,
+                "binary_sha256": {"server": "hash"},
+            }))
+            (gate_dir / "conversion.json").write_text(json.dumps({
+                "gate_passed": True, "model_key": "qwen05",
+                "conversion_gate_policy_sha256": conversion_gate_policy_sha256(),
+                "server_binary_sha256": "hash",
+            }))
+            manifest = root / "manifest.json"
+            manifest.write_text(json.dumps({"gate_passed": True}))
+            cpu, cuda = mock.MagicMock(), mock.MagicMock()
+            for server in (cpu, cuda):
+                server.__enter__.return_value = server
+                server.tokenize.return_value = [100, 101]
+                server.resource_record.return_value = {}
+            left = self._top8((10, -1.00), (11, -1.04))
+            right = self._top8((11, -1.01), (10, -1.03))
+            identities = [{"train_index": i} for i in gates.TRAIN_GATE_INDICES]
+            with ExitStack() as stack:
+                patches = {
+                    "STATUS_DIR": root,
+                    "LlamaServer": mock.Mock(side_effect=[cpu, cuda]),
+                    "sha256_file": mock.Mock(return_value="hash"),
+                    "artifact_manifest_path": mock.Mock(return_value=manifest),
+                    "artifact_path": mock.Mock(return_value=root / "model.gguf"),
+                    "binary_paths": mock.Mock(return_value={"server": root / "server"}),
+                    "_gate_prompts": mock.Mock(return_value=(["prompt"]*8, identities, None)),
+                    "_server_tokens": mock.Mock(side_effect=[[[10]*16]*8, [[11]*16]*8]),
+                    "_server_next_token_logprobs": mock.Mock(
+                        side_effect=lambda server, *args, **kwargs: left if server is cpu else right
+                    ),
+                }
+                for name, value in patches.items():
+                    stack.enter_context(mock.patch.object(gates, name, value))
+                record = gates.packed_backend_gate("qwen05", "fp16", root, gpu=0)
+            self.assertTrue(record["gate_passed"])
+            self.assertFalse(record["cpu_vs_cuda_continuation"]["passed"])
+            self.assertEqual(record["packed_gate_policy_sha256"], packed_gate_policy_sha256())
+            self.assertEqual(record["train_prompts"][0]["first_divergence_step"], 0)
+            archives = list((gate_dir / "packed__fp16_attempts").glob("*.json"))
+            self.assertEqual(len(archives), 1)
+            self.assertFalse(json.loads(archives[0].read_text())["gate_passed"])
 
     def test_reference_logits_ignore_noncritical_tail_boundary(self):
         hf = self._top8((10, -1.00), (11, -1.30))
@@ -613,6 +698,7 @@ class ProtocolTests(unittest.TestCase):
                         "model_key": "qwen05",
                         "method": "q4",
                         "artifact_sha256": "a",
+                        "packed_gate_policy_sha256": packed_gate_policy_sha256(),
                     }
                 ),
                 encoding="utf-8",
@@ -631,8 +717,18 @@ class ProtocolTests(unittest.TestCase):
             with mock.patch.object(quality, "STATUS_DIR", root), mock.patch.object(
                 quality, "artifact_manifest_path", return_value=manifest
             ):
-                with self.assertRaises(RuntimeError):
+                with self.assertRaisesRegex(RuntimeError, "hashes disagree"):
                     quality.require_quality_gates("qwen05", "q4")
+                for check in (quality.require_quality_gates, benchmark._require_benchmark_gate):
+                    packed_path = gate_dir / "packed__q4.json"
+                    packed_record = json.loads(packed_path.read_text())
+                    packed_record["packed_gate_policy_sha256"] = "obsolete"
+                    packed_path.write_text(json.dumps(packed_record))
+                    with mock.patch.object(benchmark, "STATUS_DIR", root), mock.patch.object(
+                        benchmark, "artifact_manifest_path", return_value=manifest
+                    ):
+                        with self.assertRaisesRegex(RuntimeError, "obsolete gate policy"):
+                            check("qwen05", "q4")
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

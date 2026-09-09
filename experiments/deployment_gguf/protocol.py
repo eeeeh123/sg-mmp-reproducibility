@@ -109,6 +109,11 @@ def conversion_gate_policy_sha256() -> str:
     return json_sha256(protocol_lock()["gates"]["conversion"])
 
 
+def packed_gate_policy_sha256() -> str:
+    """Bind backend evidence to the currently locked comparison semantics."""
+    return json_sha256(protocol_lock()["gates"]["packed_backend"])
+
+
 def atomic_write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(

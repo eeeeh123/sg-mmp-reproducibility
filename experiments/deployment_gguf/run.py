@@ -42,6 +42,7 @@ from experiments.deployment_gguf.protocol import (
     OUT,
     atomic_write_json,
     conversion_gate_policy_sha256,
+    packed_gate_policy_sha256,
     protocol_lock,
     sha256_file,
 )
@@ -73,6 +74,10 @@ def readiness(stage: str) -> dict:
         for method in METHODS:
             manifest = STATUS_DIR.parent / "manifests" / "artifacts" / model / f"{method}.json"
             gate = STATUS_DIR / "gates" / model / f"packed__{method}.json"
+            if gate.is_file() and json.loads(gate.read_text(encoding="utf-8")).get(
+                "packed_gate_policy_sha256"
+            ) != packed_gate_policy_sha256():
+                errors.append(f"obsolete packed gate policy {gate}")
             for path in (manifest, gate):
                 if not path.is_file():
                     errors.append(f"missing {path}")

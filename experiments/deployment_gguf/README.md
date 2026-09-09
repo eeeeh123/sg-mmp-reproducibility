@@ -29,10 +29,31 @@ The scientific contract is in `protocol_lock.json`. In particular:
 - test evaluation is impossible through the CLI until conversion, artifact, and
   CPU-vs-CUDA packed-backend gates have passed.
 
-The high-precision conversion gate checks exact tokenizer IDs, greedy
-continuations, and a frozen top-8 first-token log-probability tolerance against
-the Hugging Face FP16 source. This separates conversion correctness from later
-task-quality differences.
+Both conversion and packed gates compare all 8 x 16 positions on identical
+token histories. Packed policy v2 uses each artifact's CPU-greedy reference,
+requires top-8 overlap >= 7 and critical decision-gap errors <= 0.10, and permits
+a top-1 swap only for mutual top-two candidates with both margins <= 0.10.
+Non-finite values and missing critical candidates fail. Free-running counts
+remain diagnostics, with complete token sequences and zero-based first divergence
+positions. These full-prefix re-prefill checks do not establish incremental
+KV-cache equivalence; deployment task quality is measured separately.
+
+Packed records carry a policy hash checked by benchmark, quality, and stage
+progression. Rerun every packed gate after updating to v2. Old records are saved
+in `outputs/status/gates/<model>/packed__<method>_attempts/`; new server logs use
+unique attempt directories. Existing artifacts and conversion records are reusable
+when their existing provenance checks pass.
+
+To rerun the engineering gate on the server (GPU 0):
+
+```bash
+python -m unittest experiments.deployment_gguf.test_deployment_gguf
+for method in fp16 q4 q5 sg; do
+  python -m experiments.deployment_gguf.run packed-gate \
+    --model qwen05 --method "$method" --gpu 0 \
+    --llama-cpp-dir /data/experiment/LQ/llama.cpp-deployment-gguf-v1 || break
+done
+```
 
 ## What is measured
 

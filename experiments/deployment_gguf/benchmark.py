@@ -35,6 +35,7 @@ from experiments.deployment_gguf.protocol import (
     atomic_write_json,
     binary_paths,
     conversion_gate_policy_sha256,
+    packed_gate_policy_sha256,
     sha256_file,
 )
 from experiments.deployment_gguf.quality import load_prompts
@@ -107,6 +108,8 @@ def _require_benchmark_gate(model_key: str, method: str) -> tuple[dict, dict]:
             raise RuntimeError(f"Benchmark locked until gate passes: {path}")
         records.append(record)
     conversion_record, gate_record, manifest_record = records
+    if gate_record.get("packed_gate_policy_sha256") != packed_gate_policy_sha256():
+        raise RuntimeError("Packed gate belongs to an obsolete gate policy")
     if conversion_record.get("model_key") != model_key:
         raise RuntimeError("Conversion gate belongs to another model")
     if (

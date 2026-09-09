@@ -23,6 +23,7 @@ from experiments.deployment_gguf.protocol import (
     atomic_write_json,
     binary_paths,
     conversion_gate_policy_sha256,
+    packed_gate_policy_sha256,
     json_sha256,
     sha256_file,
 )
@@ -132,6 +133,8 @@ def require_quality_gates(model_key: str, method: str) -> dict:
             raise RuntimeError(f"Quality is locked by failed gate: {path}")
         records[path] = record
     conversion, packed, manifest = (records[path] for path in required)
+    if packed.get("packed_gate_policy_sha256") != packed_gate_policy_sha256():
+        raise RuntimeError("Packed gate belongs to an obsolete gate policy")
     if conversion.get("model_key") != model_key:
         raise RuntimeError("Conversion gate belongs to another model")
     if (
