@@ -138,6 +138,29 @@ class ProtocolTests(unittest.TestCase):
         self.assertTrue(row["explained_near_tie"])
         self.assertTrue(row["passed"])
 
+    def test_conversion_decision_retains_smollm_score_drift_diagnostic(self):
+        hf = {26: -0.001, 32: -6.8603751430744305,
+              **{token: -10.0-token for token in range(6)}}
+        gguf = {**hf, 32: -6.976925368606113}
+        row = gates._conversion_decision_agreement(hf, gguf)
+        self.assertTrue(row["passed"])
+        self.assertFalse(row["legacy_numerical_policy_passed"])
+        self.assertAlmostEqual(row["max_critical_logprob_gap_abs_error"], 0.1165502255)
+        self.assertFalse(gates._reference_logprob_agreement(hf, gguf)["passed"])
+
+    def test_conversion_decision_does_not_remove_coverage_or_flip_checks(self):
+        hf = self._top8((10, -1.0), (11, -1.3))
+        for gguf in (self._top8((11, -1.0), (10, -1.3)),
+                     self._top8((10, -1.0), (12, -1.3))):
+            self.assertFalse(gates._conversion_decision_agreement(hf, gguf)["passed"])
+        missing = {token+100: value for token, value in hf.items()}
+        self.assertFalse(gates._conversion_decision_agreement(hf, missing)["passed"])
+        with self.assertRaisesRegex(RuntimeError, "non-finite"):
+            gates._conversion_decision_agreement(hf, {**hf, 0: float("nan")})
+        near_hf = self._top8((10, -1.0), (11, -1.04))
+        near_gguf = self._top8((11, -1.01), (10, -1.03))
+        self.assertTrue(gates._conversion_decision_agreement(near_hf, near_gguf)["passed"])
+
     def test_packed_same_history_is_independent_of_free_running_cascade(self):
         cpu = self._top8((10, -1.00), (11, -1.04))
         cuda = self._top8((11, -1.01), (10, -1.03))

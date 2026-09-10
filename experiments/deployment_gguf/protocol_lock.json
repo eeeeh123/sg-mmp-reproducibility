@@ -18,6 +18,13 @@
   "pretest_amendments": [
     {
       "date": "2026-09-09",
+      "trigger": "SmolLM conversion matched 8/8 tokenizer inputs, 128/128 free-running tokens and 128/128 teacher-forced winners. One position failed the 0.10 score-gap rule with drift 0.1165502 and margins 6.8594/6.9759.",
+      "resolution": "With user authorization, separate sampled conversion decisions from score fidelity. Require finite complete top-8 rows, overlap >=7 and both top-two candidate sets covered. Unchanged top1 is accepted independently of score drift; flipped top1 retains the original bounded near-tie exception. Preserve numerical measurements, old-policy verdicts and archived original records. Do not increase the numerical tolerance.",
+      "data_available_when_frozen": "Train-only conversion and engineering diagnostics were observed before this amendment; no task-test outcomes were consulted. This is an observed-data-driven protocol revision, not an original preregistered rule.",
+      "scientific_scope": "Acceptance supports sampled decision consistency only, not distribution equivalence or universal conversion correctness. Actual deployed-model quality remains separately measured."
+    },
+    {
+      "date": "2026-09-09",
       "trigger": "Engineering Q4 cross-backend checks rejected 71/128 positions; repeated CUDA FA-on top-8 outputs were identical. User requested a literature-grounded return to deployment-cost measurement rather than backend equivalence research.",
       "resolution": "Separate operational deployment eligibility, cost measurement, and task quality. Preserve conversion/artifact/official checks. Require target CUDA FA-on loading, eight complete 16-token train continuations and finite first-position top-8 values. Preserve CPU/CUDA and FA diagnostics with their original failures, but do not require their agreement for performance or quality collection. Replace downstream packed eligibility with independently recorded deployment-check evidence.",
       "data_available_when_frozen": "Observed train-only engineering Q4 diagnostics; no deployment task-test outcomes were consulted for this change.",
@@ -208,7 +215,8 @@
       "tokenizer": "8/8 prompt token-ID arrays exactly match Hugging Face with add_special_tokens=false",
       "chat_template": "for chat models, 8/8 rendered prompt strings and token arrays are recorded and must pass the tokenizer rule",
       "effective_input": "The Hugging Face effective prompt token IDs, including its frozen special-token behavior, are recorded and passed directly to llama-server for every numerical comparison.",
-      "teacher_forced_reference_logits": "Across all 8 prompts x 16 HF-greedy reference positions, raw HF-FP16 and GGUF-FP16 next-token top-8 sets overlap on at least 7 IDs. For every token in the union of both top-2 sets, the two backends' log-probability gaps relative to their own top-1 differ by at most 0.10, the pairwise bound implied by the original 0.05 single-token numerical reference; absolute log-probability differences remain recorded diagnostics. EOS is not suppressed for this one-step distribution query. A top-1 swap is accepted only when both candidates are in both top-2 sets and both top-1 margins are at most 0.10.",
+      "decision_policy_version": 1,
+      "teacher_forced_reference_logits": "Across all 8 x 16 identical HF-greedy histories require finite complete top-8 rows, overlap >=7 and both top-two candidate sets present in both rows. An unchanged top1 passes regardless of score-gap drift, which remains recorded with the legacy <=0.10 numerical-policy verdict. A flipped top1 retains the previous exception: mutual top-two winners, both margins <=0.10, and critical score-gap drift <=0.10. EOS is unsuppressed for one-step queries. This validates sampled decisions, not full distribution equivalence.",
       "free_running_continuation": "The 8 x 16 greedy continuation agreement is recorded as an autoregressive-amplification diagnostic and is not an eligibility condition.",
       "thresholds_frozen_before_test": true
     },

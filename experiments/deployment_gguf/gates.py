@@ -209,6 +209,23 @@ def _reference_logprob_agreement(
     }
 
 
+def _conversion_decision_agreement(hf_row: dict[int, float], gguf_row: dict[int, float]) -> dict:
+    """Check sampled conversion decisions; retain numerical drift as evidence."""
+    row = _reference_logprob_agreement(hf_row, gguf_row)
+    row["legacy_numerical_policy_passed"] = row["passed"]
+    covered = (
+        row["top_k_overlap"] >= MIN_LOGPROB_TOP_K_OVERLAP
+        and row["max_critical_logprob_gap_abs_error"] is not None
+    )
+    # Preserve the previous bounded exception for near-tied flips. Only an
+    # unchanged winning decision is no longer vetoed by its score-gap drift.
+    row["decision_passed"] = covered and (
+        row["same_top1"] or (row["explained_near_tie"] and row["legacy_numerical_policy_passed"])
+    )
+    row["passed"] = row["decision_passed"]
+    return row
+
+
 def _archive_previous_gate(path: Path, archive_directory: str) -> None:
     """Preserve the last immutable gate record before publishing a replacement."""
     if not path.is_file():
@@ -386,7 +403,7 @@ def conversion_gate(model_key: str, llama_cpp_dir: Path, *, gpu: int) -> dict:
         for step, (hf_row, gguf_row) in enumerate(
             zip(hf_prompt_rows, gguf_prompt_rows)
         ):
-            row = _reference_logprob_agreement(hf_row, gguf_row)
+            row = _conversion_decision_agreement(hf_row, gguf_row)
             row["train_index"] = identities[prompt_offset]["train_index"]
             row["continuation_step"] = step
             teacher_rows.append(row)
@@ -415,8 +432,15 @@ def conversion_gate(model_key: str, llama_cpp_dir: Path, *, gpu: int) -> dict:
             "single_token_logprob_absolute_error_diagnostic_reference": (
                 MAX_COMMON_LOGPROB_ABS_ERROR
             ),
-            "maximum_critical_logprob_gap_absolute_error": (
+            "legacy_critical_logprob_gap_absolute_error_reference": (
                 MAX_CRITICAL_LOGPROB_GAP_ERROR
+            ),
+            "acceptance_scope": (
+                "sampled decision consistency with candidate coverage; score drift is "
+                "diagnostic for unchanged top1; not full distribution equivalence"
+            ),
+            "legacy_numerical_policy_failed_positions": sum(
+                not row["legacy_numerical_policy_passed"] for row in teacher_rows
             ),
             "near_tie_max_top1_margin": NEAR_TIE_MAX_MARGIN,
             "conditioning": (

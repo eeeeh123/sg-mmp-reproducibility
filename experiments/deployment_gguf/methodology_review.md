@@ -74,6 +74,25 @@ collapse still warrant investigation rather than unqualified performance claims.
 
 ## Server execution
 
+### Conversion acceptance amendment
+
+The subsequent SmolLM train-only conversion record had identical tokenizer IDs,
+all 128 free-running tokens and all 128 teacher-forced winners. One position
+exceeded the legacy 0.10 score-gap rule (0.11655 drift; margins 6.8594/6.9759).
+Following explicit user authorization, conversion acceptance now checks finite
+complete top-8 rows, overlap >=7 and presence of both top-two candidate sets.
+An unchanged winner is accepted without a score-drift veto. Flipped winners
+retain the previous bounded near-tie exception. Numerical drift and the old
+numerical-policy verdict remain in every row. This is not a claim of distribution
+equivalence. The protocol records that this revision followed observed train
+diagnostics; it is not presented as an original preregistered criterion.
+
+Rerun conversion and deployment checks for both value-stage models after updating;
+the new conversion policy hash rejects old conversion evidence downstream.
+Previous conversion attempts are archived automatically. Existing unchanged
+artifacts and matching completed cost blocks remain reusable. The generated
+value plan performs these checks before reaching task quality.
+
 ```bash
 python -m unittest experiments.deployment_gguf.test_deployment_gguf
 for method in fp16 q4 q5 sg; do

@@ -17,8 +17,8 @@ The scientific contract is in `protocol_lock.json`. In particular:
   that K-quants structurally fall back on eligible Qwen tensor dimensions;
   no such fallback is accepted by the final per-tensor audit;
 - embeddings and a stored output head remain F16;
-- FP16 conversion fidelity uses identical-token-history, teacher-forced logits
-  and decision-relative top-2 gap errors rather than absolute probability scale;
+- FP16 conversion acceptance checks identical-history sampled decisions and
+  candidate coverage; numerical score drift is recorded separately;
   free-running continuation equality is retained as a diagnostic because a
   numerically near-tied first token can amplify into a different trajectory;
 - conversion evidence is bound to the locked gate-policy hash, and superseded
@@ -118,9 +118,9 @@ Those diagnostic attempts and logs are retained, but the randomized generic-op
 suite is not an experimental eligibility gate and no post-hoc tolerance is
 introduced. The pre-artifact backend gate requires the pinned build and the
 quantization-function self-test to pass strictly. The FP16 conversion must pass
-the frozen HF-versus-GGUF token and log-probability checks, and every produced
-FP16, Q4, Q5, and SG artifact must pass the separate train-only CPU-versus-CUDA
-continuation gate before benchmarking or test evaluation.
+HF-versus-GGUF tokenizer and sampled-decision checks, and every produced
+FP16, Q4, Q5, and SG artifact must pass the separate target-CUDA operational
+deployment check before benchmarking or test evaluation.
 Compilation defaults to four parallel jobs to fit the 32-GiB server;
 `DEPLOYMENT_BUILD_JOBS` may be raised only after observing adequate free RAM.
 
