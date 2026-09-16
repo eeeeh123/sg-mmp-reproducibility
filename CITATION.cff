@@ -6,7 +6,7 @@ version: 2.0.0
 date-released: 2026-09-16
 license: MIT
 repository-code: "https://github.com/eeeeh123/sg-mmp-reproducibility"
-doi: 10.5281/zenodo.21096006
+doi: 10.5281/zenodo.22791181
 authors:
   - family-names: Cui
     given-names: Guanxun
@@ -18,4 +18,3 @@ keywords:
   - mathematical reasoning
   - mixed precision
   - reproducibility
-

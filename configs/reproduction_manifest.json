@@ -2,6 +2,7 @@
   "release_version": "2.0.0",
   "repository": "https://github.com/eeeeh123/sg-mmp-reproducibility",
   "zenodo_concept_doi": "10.5281/zenodo.21096006",
+  "zenodo_version_doi": "10.5281/zenodo.22791181",
   "primary_models": [
     {
       "key": "qwen05",

@@ -6,7 +6,9 @@ Precision*.
 
 The immutable source release is tagged
 [`v2.0.0`](https://github.com/eeeeh123/sg-mmp-reproducibility/tree/v2.0.0).
-Versioned result archives are deposited under the stable Zenodo concept DOI
+The v2.0.0 evidence archive is deposited at Zenodo DOI
+[`10.5281/zenodo.22791181`](https://doi.org/10.5281/zenodo.22791181); the stable
+all-versions DOI is
 [`10.5281/zenodo.21096006`](https://doi.org/10.5281/zenodo.21096006). See
 [`docs/zenodo_release.md`](docs/zenodo_release.md) for the exact v2.0.0 file
 inventory and integrity procedure.

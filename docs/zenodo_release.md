@@ -4,6 +4,11 @@ Use **New version** on the existing Zenodo record. Do not edit or replace the
 published v1.2.0 file. Zenodo assigns the new version its own DOI while keeping
 all versions linked by the stable concept DOI `10.5281/zenodo.21096006`.
 
+The published identifiers for this delivery are:
+
+- Version 2.0.0 DOI: `10.5281/zenodo.22791181`
+- All-versions DOI: `10.5281/zenodo.21096006`
+
 ## Upload files
 
 The release builder creates one upload directory containing:
