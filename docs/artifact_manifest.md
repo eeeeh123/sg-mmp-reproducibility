@@ -1,20 +1,24 @@
-# Artifact manifest
+# Artifact-to-claim manifest
 
-| Reported analysis or figure | Released source data or code |
+Paths beginning with `revision/` or `deployment/` refer to the correspondingly
+named Zenodo v2.0.0 result archive. Repository paths are relative to the source
+root.
+
+| Reported claim or analysis | Released evidence |
 |---|---|
-| Study overview | Direct GSM8K-500 summaries, paired statistics, bit-budget summary, layer diagnostics, `scripts/generate_concept_figures.py` |
-| SG-MMP precision policy and component evidence | `data/processed/bit_budget_summary.json`, `qwen05_ablation_analysis_gsm8k500.json`, single-layer screen, `scripts/generate_concept_figures.py` |
-| Broad benchmark degradation | `data/processed/source_artifacts/results/main_results.csv`, `scripts/generate_figures.py` |
-| Direct GSM8K-500 repair comparison | `data/processed/gsm8k500/`, direct-summary artifacts, `scripts/analyze_released_gsm8k500.py`, `scripts/generate_figures.py` |
-| Direct-result reference values | `data/processed/expected_results.json` |
-| Qwen2.5-0.5B non-overlap robustness check | `selection_eval_split_gsm8k500.json` |
-| Bit-budget table | `data/processed/bit_budget_summary.json`, `experiments/analysis/bit_budget.py` |
-| Module-allocation ablation | `qwen05_ablation_analysis_gsm8k500.json`, `experiments/fix_gsm8k_500/run.py` |
-| Same-budget allocation comparison | `results/task_results_full.jsonl`, `experiments/exp17_same_budget/run.py`, `scripts/generate_figures.py` |
-| Error-propagation interpretation | `exp02_per_layer`, `exp07_layer_replacement`, `exp14_first_divergent_step`, and `scripts/generate_concept_figures.py` |
-| Layer sensitivity and divergence diagnostics | `exp02_per_layer`, `exp14_first_divergent_step`, and `scripts/generate_figures.py` |
-| Calibration, LoRA, and OOD diagnostics | `results/task_results_full.jsonl` and corresponding experiment scripts |
+| Full-test FP16/W4/W5/W6/SG-MMP accuracies and model-level seed/item inference | `revision/experiments/revision_full/outputs/analysis_full.json`, `analysis_full.md`, and `results/samples/` |
+| Same-item generation-versus-MCQ interaction | `revision/.../results/format_control/`, canonical generation sample records, and `experiments/revision_full/analyze.py` |
+| Train-only layer selection and matched logical budgets | `revision/.../screens/`, `selections/`, `state_metadata/`, and `protocol_lock.json` |
+| Random, structured, and module-placement controls | Canonical records in `revision/.../results/samples/` plus `analysis_full.json` |
+| TaCQ shared-backend adaptation | `revision/.../tacq/frozen_manifest.json`, `external_baselines/`, contemporaneous SG/TaCQ sample records, the separate run-era TaCQ archive, and `experiments/revision_full/TACQ_INTEGRATION.md` |
+| Generation integrity and rejected online-stop candidate | `sg-mmp-integrity-audits-v2.0.0.zip`, TaCQ readiness logs, and `experiments/revision_full/shadow_gate.py` |
+| Cross-task descriptive transfer | `revision/.../results/broad/`, `results/extra/`, and `analysis_full.json` |
+| Packed GGUF quality results | `deployment/quality/samples/`, `quality/summaries/`, and the phase analysis JSON files |
+| Packed memory, latency, TTFT, and throughput | `deployment/benchmarks/raw/`, `benchmarks/blocks/`, artifact manifests, and `unified_10_block_review.json` |
+| Deployment caveats and gate history | `deployment/status/`, `provenance/`, `README_FINAL.md`, and `experiments/deployment_gguf/methodology_review.md` |
+| Historical v1.2 GSM8K-500 results | `data/processed/`; provenance only, not v2.0.0 revision evidence |
 
-All paths are relative to the repository root. Historical raw filenames may
-use `SmolLM-1.7B`; the actual checkpoint identity is SmolLM2-1.7B, as
-documented in `docs/model_provenance.md`.
+The Zenodo delivery-level `MANIFEST_v2.0.0.json` and
+`SHA256SUMS_v2.0.0.txt` bind each uploaded archive to its exact bytes. Internal
+model, dataset, state, artifact, and block hashes provide the next level of
+provenance without redistributing large reconstructible weights.

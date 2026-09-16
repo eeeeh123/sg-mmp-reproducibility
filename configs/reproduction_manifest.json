@@ -1,6 +1,7 @@
 {
-  "release_version": "1.2.0",
+  "release_version": "2.0.0",
   "repository": "https://github.com/eeeeh123/sg-mmp-reproducibility",
+  "zenodo_concept_doi": "10.5281/zenodo.21096006",
   "primary_models": [
     {
       "key": "qwen05",
@@ -20,15 +21,15 @@
       "hf_id": "HuggingFaceTB/SmolLM2-1.7B",
       "local_directory": "models/SmolLM-1.7B",
       "storage_name_note": "The local directory retains the historical SmolLM-1.7B prefix; it contains SmolLM2-1.7B."
-    }
-  ],
-  "boundary_models": [
+    },
     {
       "key": "gemma2",
       "paper_label": "Gemma-2-2B-it",
       "hf_id": "google/gemma-2-2b-it",
-      "role": "boundary-family check; not required for the primary reproduction path"
-    },
+      "local_directory": "models/gemma-2-2b-it"
+    }
+  ],
+  "boundary_models": [
     {
       "key": "tinyllama",
       "paper_label": "TinyLlama-1.1B intermediate",
@@ -37,8 +38,9 @@
     }
   ],
   "provenance_limitations": {
-    "checkpoint_revisions": "The original local downloads did not record Hugging Face commit hashes. This release therefore records canonical model identifiers but does not claim byte-identical checkpoint provenance. Future reruns should record snapshot revisions before quantization.",
-    "dataset_revision": "The release fixes GSM8K document indices and protocol, but the original cached dataset revision was not retained. Future reruns should record the Hugging Face dataset fingerprint."
+    "legacy_v1_2_checkpoint_revisions": "The historical compact v1.2 local downloads did not record Hugging Face commit hashes and therefore do not support a byte-identical checkpoint claim.",
+    "legacy_v1_2_dataset_revision": "The historical compact v1.2 path fixed GSM8K document indices and protocol but did not retain the cached dataset fingerprint.",
+    "revision_full_v4_resolution": "The completed revision-full-v4 generated model and dataset snapshot manifests before execution; the Zenodo v2.0.0 result archive preserves resolved model revisions, weight-file hashes, dataset fingerprints, and source-file hashes."
   },
   "calibration": {
     "dataset": "wikitext/wikitext-2-raw-v1",
@@ -69,8 +71,8 @@
     "smollm": [2, 6, 7, 11]
   },
   "selection_note": "The original Qwen2.5-0.5B sensitivity screen used the first 300 GSM8K test documents. The release includes a 381-example non-overlap robustness analysis; it must be reported alongside, rather than treating the full 500-example direct result as completely selection-independent.",
-  "revision_full_v3": {
-    "status": "code-verified; GPU results pending",
+  "revision_full_v4": {
+    "status": "complete; core, TaCQ, and resubmission readiness gates passed",
     "canonical_test": "all 1319 official GSM8K test items",
     "selection": "three disjoint 256-item GSM8K-train screens per model",
     "calibration_seeds": [41, 97, 193],
@@ -80,6 +82,23 @@
     },
     "model_provenance": "experiments/revision_full/outputs/model_snapshot_manifest.json is generated before experiments and records immutable Hugging Face commit SHAs",
     "storage_lifecycle": "Quantized .pt files are reconstructible and transient. The serial plan retains one precision bank plus one materialized state, deletes only after exact downstream evidence checks, and stores persistent SHA256 cleanup receipts.",
-    "protocol": "experiments/revision_full/EXPERIMENT_PLAN.md"
+    "protocol": "experiments/revision_full/EXPERIMENT_PLAN.md",
+    "core_analysis_commit": "50e71dd2513929e1a3b1a1f8f2b95f715efe7fbd",
+    "tacq_execution_commit": "8cfddcedc31efdf41125fd2145a7db7992b5338e",
+    "tacq_registration_repair_commit": "2a53f46e10807dda15f0b9d3f71a13c06c9ed748",
+    "external_baseline": "TaCQ shared-backend adaptation with contemporaneous SG-MMP controls on Qwen2.5-0.5B and Qwen2.5-1.5B",
+    "archive_role": "The Zenodo v2.0.0 revision-results archive preserves results, sample records, frozen manifests, state metadata, and analysis outputs; reconstructible quantized states are excluded."
+  },
+  "deployment_gguf_v1": {
+    "status": "complete four-model ten-block analysis; retained precision-target shortfalls are disclosed",
+    "backend": "llama.cpp",
+    "llama_cpp_commit": "050dde50c9d70cf207db84f7224eedc491d817b2",
+    "methods": ["fp16", "q4", "q5", "sg"],
+    "quality_test": "all 1319 official GSM8K test items",
+    "performance_blocks_per_model_method": 10,
+    "quality_rows": 21104,
+    "service_requests": 4000,
+    "interpretation": "backend-specific deployment transfer evidence; it is not a re-labeling of the PyTorch GPTQ experiment",
+    "archive_role": "The Zenodo v2.0.0 deployment-results archive preserves raw block records, quality samples, manifests, gate history, and final analyses; GGUF weights are excluded."
   }
 }

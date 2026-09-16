@@ -1,85 +1,83 @@
 # Reproducibility protocol
 
-## Evaluation settings
+## Current confirmatory protocol (`revision-full-v4`)
 
-The paper uses two distinct settings that must not be conflated:
+The current paper uses all 1,319 official GSM8K test items for four models:
+Qwen2.5-0.5B, Qwen2.5-1.5B, SmolLM2-1.7B, and Gemma-2-2B-it. Precision
+selection uses training data only. Seeds 41, 97, and 193 represent calibration
+variability and are aggregated at the model level with a two-stage seed/item
+bootstrap; they are not treated as independent scientific claims.
 
-1. **Broad benchmark setting:** ARC-Challenge, HellaSwag, MMLU, and a fixed
-   GSM8K-300 subset through the local LM Evaluation Harness stack.
-2. **Direct paired setting:** a fixed GSM8K-500 test subset with a common
-   five-shot prompt, greedy generation, numeric exact match, exact McNemar
-   tests, and 10,000 paired-bootstrap resamples.
+The fixed generation protocol is direct five-shot greedy decoding with
+`max_new_tokens=256`. The flexible numeric extractor is primary. Strict
+`#### number` extraction and delimiter coverage are sensitivity analyses. A
+candidate online `Question:` stopping rule failed its pre-specified Shadow gate
+and was rejected before the TaCQ extension; all reported new baselines retain
+the original generation semantics.
 
-The direct setting is reproducible through
-`experiments/fix_gsm8k_500/direct_eval.py`. It loads public GSM8K online by
-default; pass `--offline` only when reproducing from an existing Arrow cache.
+The complete execution order, lifecycle rules, and readiness gates are in:
 
-## Fixed protocol
+- `experiments/revision_full/EXPERIMENT_PLAN.md`
+- `experiments/revision_full/README.md`
+- `experiments/revision_full/SERVER_MIGRATION.md`
+- `experiments/revision_full/TACQ_INTEGRATION.md`
 
-- GSM8K-500 seed: `20260615`.
-- Selection: shuffle `range(1319)` with the seed, keep the first 500, then
-  sort indices into test-set order.
-- Calibration: 128 WikiText-2 training samples, seed 42, sequence length 2048.
-- GPTQ: 4-bit weights and group size 128.
-- Direct generation: five in-context examples, greedy decoding, maximum 256
-  generated tokens.
+The Zenodo v2.0.0 revision archive supplies the generated `protocol_lock.json`,
+resolved model and dataset manifests, selections, screens, per-run/sample
+records, state metadata, external-baseline registrations, and
+`analysis_full.json`. Reconstructible `.pt` states are intentionally excluded.
 
-`configs/reproduction_manifest.json` is the machine-readable source for this
-protocol and for the published sensitive-layer sets.
+## TaCQ extension
 
-## Public verification path
+TaCQ is a disclosed shared-backend adaptation, not an unmodified upstream
+reproduction. Its source commit, train-only importance settings, rounding rule,
+logical-bit ledger, and mask hashes are frozen before test evaluation. Each of
+the six TaCQ cells is paired with a contemporaneously regenerated SG-MMP
+control. Primary inference is performed for two model-level effects; seed-level
+McNemar and bootstrap results are diagnostics.
 
-The release contains enough redacted data to audit the reported direct paired
-statistics without model checkpoints:
+## Packed GGUF/CUDA extension
+
+The deployment study starts from the frozen SG allocation but requantizes the
+original high-precision checkpoints into backend-specific GGUF artifacts. It
+therefore evaluates allocation transfer, not the runtime of the Python
+`GPTQLinear` implementation. FP16, Q4, Q5, and SG artifacts use one pinned
+`llama.cpp` commit and a shared train-only importance matrix within each model.
+
+Quality uses the full 1,319-item protocol. Performance uses fixed 128-token
+generation and ten process blocks per model and method. `llama-bench` compute
+measurements are kept separate from streaming `llama-server` TTFT, latency,
+memory, and throughput. The Zenodo deployment archive preserves every retained
+block, quality row, artifact/gate manifest, historical failure record, and the
+final four-model analysis. It does not contain GGUF weights.
+
+## Public verification
+
+The source snapshot can be verified without model weights:
 
 ```powershell
 python scripts/reproduce_core.py verify-public
-python scripts/reproduce_core.py figures
 ```
 
-The first command validates `SHA256SUMS` and recomputes
-`data/processed/gsm8k500/recomputed_paired_stats.json` from
-`per_example_correctness.csv`. The second command creates ignored local figure
-files from released summaries only. It runs both `scripts/generate_figures.py`
-for the quantitative result plots and `scripts/generate_concept_figures.py`
-for the study-overview, precision-policy, and error-propagation figures.
+This checks `SHA256SUMS` and recomputes the historical redacted v1.2 paired
+statistics byte-for-byte. The large v2.0.0 evidence is validated independently
+with `MANIFEST_v2.0.0.json` and `SHA256SUMS_v2.0.0.txt` from the Zenodo upload.
+End-to-end reruns require downloading the model checkpoints and public datasets
+identified in the archived manifests.
 
-## End-to-end rerun path
+## Historical v1.2 protocol
 
-```powershell
-python scripts/reproduce_core.py download-primary
-python scripts/reproduce_core.py prepare-data
-python scripts/reproduce_core.py quantize
-python scripts/reproduce_core.py evaluate
-python scripts/reproduce_core.py analyze
-```
+The repository retains the fixed GSM8K-500 analysis and broad benchmark
+artifacts released in v1.2.0. That material is exploratory provenance only. It
+must not be pooled with, averaged into, or substituted for missing
+`revision-full-v4` evidence. Its original selection seed, redacted outcomes,
+and recomputed paired statistics remain under `data/processed/`.
 
-The wrapper is intentionally explicit about stages. It does not publish or
-copy intermediate `.pt` states, raw GSM8K records, or raw generations. The
-private evaluator writes raw logs under ignored `samples/` directories; use
-`scripts/export_public_gsm8k_results.py` if a future release needs redacted
-per-example outcomes.
+## Availability boundary
 
-## Selection/evaluation separation
-
-The original Qwen2.5-0.5B single-layer sensitivity screen used the first 300
-GSM8K test documents. Consequently, 119 documents in the fixed direct-500
-subset overlap that historical screen. This release includes a non-overlap
-robustness analysis on the remaining 381 documents in:
-
-```text
-data/processed/source_artifacts/experiments/fix_gsm8k_500/
-results_direct/selection_eval_split_gsm8k500.json
-```
-
-For Qwen2.5-0.5B, the non-overlap slice reports GPTQ-W4 16.01, SG-MMP 28.08,
-and a +12.07 point paired difference (95% bootstrap CI [7.61, 16.54]; exact
-McNemar p = 3.32e-7). This is a robustness check, not a substitute for a
-fresh validation-based layer-selection study.
-
-## Provenance limitations
-
-The original runs did not preserve Hugging Face checkpoint commit hashes or a
-dataset fingerprint. The release records the canonical identifiers and exact
-input-selection algorithm, but it does not claim that a new upstream download
-will be byte-identical. Record those revisions before any future rerun.
+Authored code is released under MIT. Public benchmark records and model outputs
+inside the evidence archives are included for result auditing and remain
+subject to applicable upstream terms. Pretrained weights, dataset caches,
+reconstructible quantized states, and GGUF weight files are not redistributed;
+the archive records resolved identities, hashes, commands, and environment
+details needed to reconstruct them.

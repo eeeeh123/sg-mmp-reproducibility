@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use this software or its archived evidence, please cite the Zenodo record and the associated article."
+title: "SG-MMP: Reproducibility Package for Reasoning Fragility in Quantized Small Language Models"
+type: software
+version: 2.0.0
+date-released: 2026-09-16
+license: MIT
+repository-code: "https://github.com/eeeeh123/sg-mmp-reproducibility"
+doi: 10.5281/zenodo.21096006
+authors:
+  - family-names: Cui
+    given-names: Guanxun
+  - family-names: Liu
+    given-names: Qiang
+keywords:
+  - post-training quantization
+  - small language models
+  - mathematical reasoning
+  - mixed precision
+  - reproducibility
+

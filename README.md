@@ -1,127 +1,102 @@
 # SG-MMP Reproducibility Package
 
-Version `1.2.0` of the code and derived results supporting *Reasoning
-Fragility in Quantized Small Language Models: Diagnosis and
-Sensitivity-Guided Mixed-Precision Repair*.
+Version `2.0.0` of the code supporting *Reasoning Fragility under Low-Bit
+Quantization: Full-Test, Seed-Aware Evidence for Sensitivity-Guided Mixed
+Precision*.
 
-The current `main` branch additionally includes the fail-closed
-`revision-full-v4` rejection-revision pipeline. Its new full-test GPU results
-are intentionally marked pending; the published v1.2 GSM8K-500 results below
-remain exploratory provenance and are forbidden as v4 evidence.
+The immutable source release is tagged
+[`v2.0.0`](https://github.com/eeeeh123/sg-mmp-reproducibility/tree/v2.0.0).
+Versioned result archives are deposited under the stable Zenodo concept DOI
+[`10.5281/zenodo.21096006`](https://doi.org/10.5281/zenodo.21096006). See
+[`docs/zenodo_release.md`](docs/zenodo_release.md) for the exact v2.0.0 file
+inventory and integrity procedure.
 
-## What this release can reproduce
+## What v2.0.0 contains
 
-Two reproduction paths are deliberately separated:
+The release separates source code from large result evidence:
 
-1. **Public-artifact verification, no GPU or checkpoints required.** Recompute
-   the paired GSM8K-500 statistics from redacted per-example outcomes and
-   regenerate all manuscript figures backed by the released numerical data.
-2. **End-to-end model rerun.** Download the three primary checkpoints, cache
-   public datasets, regenerate GPTQ and SG-MMP states, and run direct
-   GSM8K-500 evaluation.
+1. **Source archive.** This repository, frozen protocol definitions, tests,
+   environment pins, and analysis code.
+2. **`revision-full-v4` evidence.** Full 1,319-item GSM8K results, three
+   calibration seeds, matched-budget controls, cross-task summaries, TaCQ
+   registrations and contemporaneous SG-MMP controls, frozen manifests, state
+   metadata, and analysis outputs.
+3. **Packed deployment evidence.** Four-model GGUF/CUDA quality and performance
+   records for FP16, Q4, Q5, and the frozen SG allocation, including ten
+   process blocks per model and method, gate history, artifact manifests, and
+   final analyses.
 
-The package does not redistribute model weights, quantized states, GSM8K
-prompts or answers, or generated reasoning traces. See
-`docs/reproducibility.md` for the protocol and `docs/environment.md` for the
-tested software stack.
+Pretrained weights, reconstructible PyTorch quantized states, GGUF weight
+files, and dataset caches are not redistributed. Their immutable identities,
+hashes where available, and reconstruction commands are preserved in the
+released manifests.
 
-## Historical v1.2 direct GSM8K-500 results (not revision evidence)
+## Main `revision-full-v4` result
 
-| Model | GPTQ-W4 | SG-MMP | Difference | Paired bootstrap 95% CI |
-|---|---:|---:|---:|---|
-| Qwen2.5-0.5B | 16.80 | 26.80 | +10.00 | [+6.20, +14.00] |
-| Qwen2.5-1.5B | 46.00 | 56.20 | +10.20 | [+6.00, +14.40] |
-| SmolLM2-1.7B | 18.80 | 25.80 | +7.00 | [+3.20, +10.80] |
-| Gemma-2-2B-it | 47.20 | 50.40 | +3.20 | [-0.40, +6.80] |
+The primary endpoint is direct five-shot greedy generation on all 1,319 GSM8K
+test items. Calibration seeds 41, 97, and 193 are repeated calibration
+realizations, not independent scientific claims. Model-level intervals use the
+pre-specified two-stage seed/item bootstrap.
 
-Gemma-2-2B-it is a boundary-family check: its confidence interval crosses
-zero and is not confirmatory evidence for SG-MMP.
+| Model | FP16 | W4 mean | SG-MMP mean | SG-MMP minus W4 | 95% CI | SG average bits |
+|---|---:|---:|---:|---:|---|---:|
+| Qwen2.5-0.5B | 35.56 | 12.36 | 22.04 | +9.68 | [8.24, 11.09] | 4.897 |
+| Qwen2.5-1.5B | 60.65 | 47.97 | 54.26 | +6.29 | [4.27, 8.29] | 4.935 |
+| SmolLM2-1.7B | 28.89 | 14.18 | 25.12 | +10.94 | [8.57, 13.34] | 4.885 |
+| Gemma-2-2B-it | 52.77 | 45.69 | 49.07 | +3.39 | [2.00, 4.83] | 4.890 |
 
-## Quick start: verify the public release
+SG-MMP is a consistent partial recovery from W4 in this setting. It does not
+outperform uniform W5/W6. The TaCQ shared-backend comparison is model dependent:
+both model-level seed/item intervals include zero. These boundaries are part of
+the result, not omitted failure cases.
+
+## Packed deployment extension
+
+The deployment extension asks whether the already frozen allocation transfers
+to a useful quality-memory-speed trade-off on one pinned `llama.cpp` CUDA
+backend. It uses newly quantized GGUF artifacts and is reported separately from
+the PyTorch GPTQ experiment. Across the tested workloads, SG is slower than Q4,
+usually faster than Q5 at concurrency four, and does not have a universal
+quality advantage over Q5. See
+[`experiments/deployment_gguf/README.md`](experiments/deployment_gguf/README.md)
+for the frozen design and limitations.
+
+## Verify the source release
+
+Create an environment from `requirements.txt`, then run:
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
 python scripts/reproduce_core.py verify-public
-python scripts/reproduce_core.py figures
+python -m unittest `
+  experiments.revision_full.test_protocol `
+  experiments.revision_full.test_resume `
+  experiments.revision_full.test_lifecycle `
+  experiments.revision_full.test_diagnostics `
+  experiments.revision_full.test_quantization_pipeline `
+  experiments.revision_full.test_tacq_protocol `
+  experiments.deployment_gguf.test_deployment_gguf -v
 ```
 
-`verify-public` validates every source-file checksum and confirms that the
-released redacted outcomes reproduce the paired-statistics JSON byte-for-byte.
-Generated figures are written to the ignored local `figures/` directory. The
-quantitative result plots are produced by `scripts/generate_figures.py`; the
-study-overview, precision-policy, and error-propagation figures are produced by
-`scripts/generate_concept_figures.py` from the same released JSON/CSV sources.
+`verify-public` validates `SHA256SUMS` and the legacy v1.2 redacted
+GSM8K-500 statistics retained for provenance. The v2.0.0 Zenodo delivery
+manifest separately validates the large revision and deployment archives.
 
-## End-to-end rerun
+## Reproduce the current experiments
 
-```powershell
-python scripts/reproduce_core.py download-primary
-python scripts/reproduce_core.py prepare-data
-python scripts/reproduce_core.py quantize
-python scripts/reproduce_core.py evaluate
-python scripts/reproduce_core.py analyze
-```
+- Full revision protocol: [`experiments/revision_full/README.md`](experiments/revision_full/README.md)
+- TaCQ extension: [`experiments/revision_full/TACQ_INTEGRATION.md`](experiments/revision_full/TACQ_INTEGRATION.md)
+- GGUF deployment extension: [`experiments/deployment_gguf/README.md`](experiments/deployment_gguf/README.md)
+- Artifact-to-claim map: [`docs/artifact_manifest.md`](docs/artifact_manifest.md)
+- Environment and provenance: [`docs/environment.md`](docs/environment.md) and
+  [`docs/model_provenance.md`](docs/model_provenance.md)
 
-The main quantization steps are GPU-intensive. The wrapper runs each model
-family in separate Python processes and writes intermediate states under the
-ignored local `results/` directory. Use `--dry-run` with any command to inspect
-the exact commands before running them.
+The experiment scripts write all large local outputs beneath ignored
+`outputs/`, `results/`, `samples/`, and `logs/` paths. Do not add weights or
+server caches to Git.
 
-## Rejection-revision full experiment
+## Legacy v1.2 material
 
-The resource-aware v4 protocol uses all 1,319 official GSM8K test items,
-native train-only sensitivity screens for every model, three calibration
-seeds, W4/W5/W6 and matched-placement controls, two 30-allocation null
-families for every primary model, selection/bootstrap uncertainty, explicit
-format and task controls, and fail-closed external-baseline gates.
-
-Model weights are not stored in GitHub or Git LFS. On the laboratory server,
-download and pin them directly from Hugging Face:
-
-```bash
-python experiments/revision_full/download_models.py --models qwen05 qwen15 smollm
-hf auth login  # required after accepting the Gemma license
-python experiments/revision_full/download_models.py --models gemma2
-python experiments/revision_full/download_core_datasets.py
-export REVISION_FULL_STATE_DIR=/scratch/$USER/sg-mmp-revision-states  # optional
-export HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1
-export REVISION_FULL_EVAL_BATCH_SIZE=4 REVISION_FULL_FORMAT_BATCH_SIZE=2
-# Smoke all four architectures on GSM8K train before freezing batch settings.
-CUDA_VISIBLE_DEVICES=0 python experiments/revision_full/run.py smoke-eval --model gemma2 --batch-size 4 --format-batch-size 2
-CUDA_VISIBLE_DEVICES=0 python experiments/revision_full/run.py smoke-eval --model qwen05 --batch-size 4 --format-batch-size 2
-CUDA_VISIBLE_DEVICES=1 python experiments/revision_full/run.py smoke-eval --model smollm --batch-size 4 --format-batch-size 2
-CUDA_VISIBLE_DEVICES=1 python experiments/revision_full/run.py smoke-eval --model qwen15 --batch-size 4 --format-batch-size 2
-python experiments/revision_full/run.py prepare --force
-python experiments/revision_full/format_control.py --prepare-only --force
-python experiments/revision_full/server_preflight.py --expected-gpus 2 --concurrent-models 2
-mkdir -p server_plans logs
-python experiments/revision_full/make_server_shard.py --models gemma2 qwen05 > server_plans/gpu0.sh
-python experiments/revision_full/make_server_shard.py --models smollm qwen15 > server_plans/gpu1.sh
-# Launch one shard per GPU only when preflight reports ready=true.
-```
-
-The downloader records immutable upstream commit SHAs and resumes interrupted
-files. The generated server plan keeps only one materialized quantized state at
-a time, validates and hashes persistent evidence before cleanup, and safely
-skips already-complete work even after reconstructible `.pt` files are removed.
-The largest single-process transient state peak is about 9.9 GiB; two
-concurrent model processes are estimated at 17.78 GiB before safety and
-persistent-result reserves. See
-`experiments/revision_full/SERVER_MIGRATION.md` for the complete
-two-RTX-3090 workflow and `experiments/revision_full/EXPERIMENT_PLAN.md`
-for the reviewer-facing evidence gates.
-
-## Important provenance note
-
-The original local downloads did not preserve Hugging Face checkpoint commit
-hashes or the original dataset fingerprint. Canonical model identifiers,
-protocol, fixed test indices, and this limitation are recorded in
-`configs/reproduction_manifest.json`. A future rerun should record its own
-checkpoint revisions before claiming byte-identical reproduction.
-
-For model identity, artifact-to-claim mapping, and archive boundaries, see
-`docs/model_provenance.md`, `docs/artifact_manifest.md`, and
-`docs/zenodo_release.md`.
-
+The historical v1.2.0 GSM8K-500 analysis remains in `data/processed/` so that
+earlier claims and figures stay auditable. It is exploratory provenance only
+and must not be pooled with or substituted for the complete v2.0.0
+`revision-full-v4` evidence.

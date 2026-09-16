@@ -1,13 +1,20 @@
 {
   "title": "SG-MMP: Reproducibility Package for Reasoning Fragility in Quantized Small Language Models",
   "upload_type": "software",
-  "version": "1.2.0",
-  "description": "Code, fixed evaluation indices, redacted derived outcomes, paired statistical analyses, and figure-generation scripts for sensitivity-guided module-level mixed-precision repair of quantization-induced reasoning degradation in small language models. Version 1.2.0 adds standalone generation of the study-overview, precision-policy, and error-propagation figures from released JSON and CSV sources. Model weights, quantized states, raw benchmark records, and reasoning traces are not redistributed.",
+  "version": "2.0.0",
+  "description": "Source code and versioned evidence for the complete revision-full-v4 study of sensitivity-guided module-level mixed precision. Version 2.0.0 adds all-1,319-item GSM8K results across four models and three calibration seeds, matched-budget controls, the disclosed TaCQ shared-backend adaptation with contemporaneous SG-MMP controls, generation-integrity and Shadow-gate records, and a four-model GGUF/CUDA deployment-transfer extension with ten process blocks per model and method. The release includes frozen protocol, model and dataset manifests, per-run/sample records, checksums, and machine-readable analyses. Pretrained model weights, reconstructible quantized states, GGUF weight files, and dataset caches are not redistributed.",
   "creators": [
     {"name": "Cui, Guanxun"},
     {"name": "Liu, Qiang"}
   ],
   "keywords": ["post-training quantization", "small language models", "mathematical reasoning", "mixed precision", "reproducibility"],
   "license": "MIT",
-  "access_right": "open"
+  "access_right": "open",
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/eeeeh123/sg-mmp-reproducibility/tree/v2.0.0",
+      "relation": "isSupplementTo",
+      "scheme": "url"
+    }
+  ]
 }

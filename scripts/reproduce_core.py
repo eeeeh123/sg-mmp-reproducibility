@@ -14,6 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from write_manifest import is_released_file
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PRIMARY_MODELS = ("qwen05", "qwen15", "smollm")
@@ -167,15 +169,27 @@ def sha256(path: Path) -> str:
 def verify_public_release(dry_run: bool) -> None:
     checksum_file = ROOT / "SHA256SUMS"
     failures = []
+    listed = set()
     for line in checksum_file.read_text(encoding="utf-8").splitlines():
         if not line:
             continue
         expected, relative = line.split("  ", 1)
+        listed.add(relative)
         candidate = ROOT / relative
         if not candidate.exists() or sha256(candidate) != expected:
             failures.append(relative)
-    if failures:
-        raise RuntimeError(f"Checksum validation failed: {failures}")
+    current = {
+        path.relative_to(ROOT).as_posix()
+        for path in ROOT.rglob("*")
+        if is_released_file(path, ROOT, checksum_file)
+    }
+    missing = sorted(current - listed)
+    extra = sorted(listed - current)
+    if failures or missing or extra:
+        raise RuntimeError(
+            "Checksum validation failed: "
+            f"mismatches={failures}, missing={missing}, extra={extra}"
+        )
     print("[ok] SHA256SUMS validates every released source file", flush=True)
 
     audit_dir = ROOT / ".release-audit"
